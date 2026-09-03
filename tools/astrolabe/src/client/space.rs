@@ -100,9 +100,9 @@ pub enum SpaceOp {
         passphrase: String,
         force: bool,
     },
-    /// Sponsor a co-located agent identity by name.
-    AgentProvision {
-        name: String,
+    /// Sponsor an existing global agent identity by stable ProfileId.
+    AgentSponsor {
+        agent: String,
     },
 }
 
@@ -119,7 +119,7 @@ impl SpaceOp {
             Self::DeviceRevoke { device } => format!("revoke device {device}"),
             Self::CustodyExport { .. } => "export this device's recovery share".into(),
             Self::CustodyImport { .. } => "restore a recovery share".into(),
-            Self::AgentProvision { name } => format!("sponsor agent '{name}'"),
+            Self::AgentSponsor { agent } => format!("sponsor agent {agent}"),
         }
     }
 
@@ -134,7 +134,7 @@ impl SpaceOp {
             Self::DeviceRevoke { device } => format!("device.revoke:{device}"),
             Self::CustodyExport { .. } => "custody.export".into(),
             Self::CustodyImport { .. } => "custody.import".into(),
-            Self::AgentProvision { name } => format!("agent.provision:{name}"),
+            Self::AgentSponsor { agent } => format!("agent.sponsor:{agent}"),
         }
     }
 
@@ -170,7 +170,7 @@ impl SpaceOp {
                 passphrase,
                 force,
             },
-            Self::AgentProvision { name } => Request::AgentProvision { name },
+            Self::AgentSponsor { agent } => Request::AgentSponsor { agent },
         }
     }
 }
@@ -369,24 +369,24 @@ mod tests {
     #[test]
     fn sponsoring_two_agents_are_two_things_in_flight() {
         assert_ne!(
-            SpaceOp::AgentProvision {
-                name: "grok".into()
+            SpaceOp::AgentSponsor {
+                agent: "prf_grok".into()
             }
             .key(),
-            SpaceOp::AgentProvision {
-                name: "claude".into()
+            SpaceOp::AgentSponsor {
+                agent: "prf_claude".into()
             }
             .key()
         );
         assert!(
-            SpaceOp::AgentProvision {
-                name: "grok".into()
+            SpaceOp::AgentSponsor {
+                agent: "prf_grok".into()
             }
             .what()
             .contains("grok"),
             "{}",
-            SpaceOp::AgentProvision {
-                name: "grok".into()
+            SpaceOp::AgentSponsor {
+                agent: "prf_grok".into()
             }
             .what()
         );

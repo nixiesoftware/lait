@@ -61,7 +61,7 @@ use std::sync::{
 };
 
 /// Standalone canonical encoding generation for [`Spec`].
-const SPEC_VERSION: u8 = 1;
+const SPEC_VERSION: u8 = 2;
 /// Standalone canonical encoding generation for [`Build`].
 const BUILD_VERSION: u8 = 1;
 /// Standalone canonical encoding generation for [`Offer`].
@@ -139,7 +139,7 @@ pub const BUILD_ENVELOPE_KEY: &str = "bytes";
 /// Domain for deriving a reserved Build Body id from a [`BuildId`].
 const BUILD_BODY_ID_DOMAIN: &[u8] = b"lait/exec/build-body/1\0";
 
-const RUN_EVENT_VERSION: u8 = 2;
+const RUN_EVENT_VERSION: u8 = 3;
 const RUN_EVENT_ID_CONTEXT: &str = "lait.exec.run-event.v1";
 const RUN_ID_DOMAIN: &[u8] = b"lait/exec/run-id/1\0";
 const ACTIVE_RUN_BODY_DOMAIN: &[u8] = b"lait/exec/active-body/1\0";
@@ -172,7 +172,7 @@ pub const RESERVED_SCHEMAS: [&str; 4] = [
     ACTIVE_RUN_BODY_SCHEMA,
 ];
 /// Version of the Runtime-owned Run Body schema.
-pub const RUN_BODY_SCHEMA_VERSION: u32 = 1;
+pub const RUN_BODY_SCHEMA_VERSION: u32 = 2;
 /// Version of the Runtime-owned Build Body schema.
 pub const BUILD_BODY_SCHEMA_VERSION: u32 = 1;
 /// Version of the Runtime-owned Service Body schema.
@@ -271,6 +271,11 @@ pub struct Access {
     pub offer: Vec<u8>,
     pub control: Vec<u8>,
     pub accept: Vec<u8>,
+    /// Standing to discover and attach to a live terminal session. Byte
+    /// observation additionally requires the output payload's read demand;
+    /// driving additionally requires `control`. Absence is deliberately
+    /// fail-closed: the Spec is not attachable.
+    pub attach: Option<Vec<u8>>,
 }
 
 /// One bounded payload contract.
@@ -295,6 +300,50 @@ pub enum Mode {
     Unary,
     Stream,
     Interactive,
+}
+
+/// Whether a terminal Attempt leaves a durable, host-authored recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Transcript {
+    /// Live bytes remain activation-local and disappear with the session.
+    #[default]
+    Never,
+    /// Runtime seals a bounded transcript beside a successful Returned event.
+    OnReturn,
+}
+
+/// Terminal-specific ceilings and durability posture.
+///
+/// This block is present for every Spec so the Mode matrix remains explicit.
+/// Non-interactive Specs use zero live input; transcript recording is also
+/// opt-in rather than inferred from a frontend attaching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TerminalSpec {
+    pub transcript: Transcript,
+    pub max_transcript_bytes: u64,
+    pub max_live_input_bytes: u64,
+}
+
+impl TerminalSpec {
+    pub const fn disabled() -> Self {
+        Self {
+            transcript: Transcript::Never,
+            max_transcript_bytes: 0,
+            max_live_input_bytes: 0,
+        }
+    }
+
+    fn validate(self) -> Result<(), Invalid> {
+        if self.max_transcript_bytes == u64::MAX
+            || self.max_live_input_bytes == u64::MAX
+            || self.max_transcript_bytes > MAX_CONTENT_LEN
+            || matches!(self.transcript, Transcript::Never) && self.max_transcript_bytes != 0
+            || matches!(self.transcript, Transcript::OnReturn) && self.max_transcript_bytes == 0
+        {
+            return Err(Invalid::InvalidSpec("terminal"));
+        }
+        Ok(())
+    }
 }
 
 /// How a later Attempt reconstructs one Run.
@@ -421,6 +470,7 @@ pub struct Spec {
     pub input: PayloadSpec,
     pub output: PayloadSpec,
     pub mode: Mode,
+    pub terminal: TerminalSpec,
     pub resume: Resume,
     pub effects: Effects,
     pub accept: AcceptRule,
@@ -546,6 +596,13 @@ impl Access {
             if !valid_demand(bytes) {
                 return Err(Invalid::InvalidSpec(name));
             }
+        }
+        if self
+            .attach
+            .as_deref()
+            .is_some_and(|bytes| !valid_demand(bytes))
+        {
+            return Err(Invalid::InvalidSpec("access.attach"));
         }
         Ok(())
     }
@@ -681,15 +738,22 @@ impl Spec {
         self.input.validate("input")?;
         self.output.validate("output")?;
         self.limits.validate()?;
+        self.terminal.validate()?;
 
         if self.output.max_additional_input_bytes != 0 {
             return Err(Invalid::InvalidSpec("output additional input"));
         }
         match self.mode {
-            Mode::Interactive if self.input.max_additional_input_bytes == 0 => {
+            Mode::Interactive
+                if self.input.max_additional_input_bytes == 0
+                    && self.terminal.max_live_input_bytes == 0 =>
+            {
                 return Err(Invalid::InvalidSpec("interactive input"));
             }
-            Mode::Unary | Mode::Stream if self.input.max_additional_input_bytes != 0 => {
+            Mode::Unary | Mode::Stream
+                if self.input.max_additional_input_bytes != 0
+                    || self.terminal.max_live_input_bytes != 0 =>
+            {
                 return Err(Invalid::InvalidSpec("additional input mode"));
             }
             Mode::Unary | Mode::Stream | Mode::Interactive => {}
@@ -988,6 +1052,13 @@ pub struct HandlerBinding {
 /// turns a successful [`Candidate`] into canonical, attributed Run events.
 pub trait Handler: std::marker::Send + Sync {
     fn binding(&self) -> &HandlerBinding;
+
+    /// The strongest boundary this performer actually supplies. Existing
+    /// in-process handlers remain Advisory; non-Unary dispatch requires a
+    /// process boundary or stronger.
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::Advisory
+    }
 
     fn handle(&self, context: &mut dyn HandlerContext) -> Result<Candidate, Failure>;
 }
@@ -1461,6 +1532,601 @@ pub trait ContentDelegate {
     fn read(&self, content: &ContentRef, offset: u64, len: usize) -> Result<Vec<u8>, Failure>;
 }
 
+/// One channel of transient performer output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputChannel {
+    /// A PTY's single byte stream. Runtime never fabricates stderr separation.
+    Merged,
+    Stdout,
+    Stderr,
+}
+
+/// One controller action delivered to an interactive performer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputEvent {
+    Stdin(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
+    Interrupt,
+    StdinEof,
+}
+
+/// Typed absence or refusal at the activation-local terminal boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalFailure {
+    Unsupported,
+    Unavailable,
+    MismatchedAttempt,
+    Detached,
+    Ended,
+    InputLimit,
+    OutputLimit,
+    Os,
+}
+
+/// Host-owned live output and transcript facade lent to a non-Unary handler.
+pub trait OutputSink: std::marker::Send + Sync {
+    /// Append exact bytes and return the exclusive byte cursor after them.
+    fn write(&self, channel: OutputChannel, bytes: &[u8]) -> Result<u64, TerminalFailure>;
+    /// Record the exact output cursor at which geometry took effect.
+    fn resized(&self, cols: u16, rows: u16) -> Result<u64, TerminalFailure>;
+    /// Observe performer exit without claiming a durable Returned fact.
+    fn exited(&self, code: Option<i32>) -> Result<(), TerminalFailure>;
+    /// Return the bounded transcript batch when the Spec opted into one.
+    fn transcript(&self) -> Result<Option<Vec<u8>>, TerminalFailure>;
+}
+
+/// Host-owned controller facade lent only to an Interactive handler.
+pub trait InputSource: std::marker::Send + Sync {
+    /// Wait for one already-bounded controller action. `None` is an ordinary
+    /// timeout so a performer can continue checking cancellation and exit.
+    fn receive(&self, timeout: std::time::Duration) -> Result<Option<InputEvent>, TerminalFailure>;
+}
+
+/// One activation-local terminal record. Output ranges use half-open byte
+/// cursors; geometry and endings are stamped at the exact current cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalRecord {
+    Output {
+        start: u64,
+        end: u64,
+        channel: OutputChannel,
+        bytes: Vec<u8>,
+    },
+    Resized {
+        at: u64,
+        cols: u16,
+        rows: u16,
+    },
+    ProcessExited {
+        at: u64,
+        code: Option<i32>,
+    },
+    AttemptEnded {
+        at: u64,
+        event: EventId,
+    },
+    /// Counted live-ring loss. This is emitted to a reader that asks before
+    /// the retained base; it is never synthesized as terminal state.
+    Gap {
+        after_seq: u64,
+        dropped_bytes: u64,
+    },
+    Suppressed {
+        at: u64,
+        dropped_bytes: u64,
+    },
+}
+
+/// Bounded late-attach replay followed by the current splice cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalRead {
+    pub base_offset: u64,
+    pub next_offset: u64,
+    pub dropped_bytes: u64,
+    pub records: Vec<TerminalRecord>,
+    pub ended: bool,
+}
+
+/// Versioned durable recording sealed by Runtime, never by the handler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptBatch {
+    pub version: u8,
+    pub run: RunId,
+    pub attempt: AttemptId,
+    pub records: Vec<TerminalRecord>,
+}
+
+impl TranscriptBatch {
+    pub const VERSION: u8 = 1;
+
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, TerminalFailure> {
+        let batch: Self = postcard::from_bytes(bytes).map_err(|_| TerminalFailure::Unavailable)?;
+        if batch.version != Self::VERSION
+            || postcard::to_stdvec(&batch).map_err(|_| TerminalFailure::Unavailable)? != bytes
+        {
+            return Err(TerminalFailure::Unsupported);
+        }
+        Ok(batch)
+    }
+}
+
+struct TerminalState {
+    base_offset: u64,
+    next_offset: u64,
+    ring_bytes: usize,
+    ring: VecDeque<TerminalRecord>,
+    input_bytes: u64,
+    input: VecDeque<InputEvent>,
+    input_ended: bool,
+    process_exited: bool,
+    attempt_ended: bool,
+    attached: u32,
+    transcript: Vec<TerminalRecord>,
+    transcript_suppressed: u64,
+}
+
+/// Station-activation state for one exact `(RunId, AttemptId)`.
+///
+/// This is the concrete host behind the OutputSink/InputSource facets. It is
+/// intentionally not serializable and never becomes a second Run model.
+pub(crate) struct TerminalSession {
+    run: RunId,
+    attempt: AttemptId,
+    ring_limit: usize,
+    output_limit: u64,
+    input_limit: u64,
+    transcript_limit: usize,
+    transcript_enabled: bool,
+    state: std::sync::Mutex<TerminalState>,
+    input_ready: std::sync::Condvar,
+}
+
+impl TerminalSession {
+    pub(crate) fn new(
+        run: RunId,
+        attempt: AttemptId,
+        progress_bytes: u64,
+        terminal: TerminalSpec,
+    ) -> Self {
+        const MAX_RING_BYTES: u64 = 1024 * 1024;
+        let ring_limit = usize::try_from(progress_bytes.min(MAX_RING_BYTES)).unwrap_or(usize::MAX);
+        let transcript_limit = usize::try_from(terminal.max_transcript_bytes).unwrap_or(usize::MAX);
+        Self {
+            run,
+            attempt,
+            ring_limit,
+            output_limit: progress_bytes,
+            input_limit: terminal.max_live_input_bytes,
+            transcript_limit,
+            transcript_enabled: matches!(terminal.transcript, Transcript::OnReturn),
+            state: std::sync::Mutex::new(TerminalState {
+                base_offset: 0,
+                next_offset: 0,
+                ring_bytes: 0,
+                ring: VecDeque::new(),
+                input_bytes: 0,
+                input: VecDeque::new(),
+                input_ended: false,
+                process_exited: false,
+                attempt_ended: false,
+                attached: 0,
+                transcript: Vec::new(),
+                transcript_suppressed: 0,
+            }),
+            input_ready: std::sync::Condvar::new(),
+        }
+    }
+
+    pub(crate) const fn coordinates(&self) -> (RunId, AttemptId) {
+        (self.run, self.attempt)
+    }
+
+    pub(crate) fn attach(self: &Arc<Self>) -> TerminalAttachment {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.attached = state.attached.saturating_add(1);
+        drop(state);
+        TerminalAttachment {
+            session: self.clone(),
+            detached: false,
+        }
+    }
+
+    pub(crate) fn attempt_ended(&self, event: EventId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.attempt_ended {
+            return;
+        }
+        state.attempt_ended = true;
+        let record = TerminalRecord::AttemptEnded {
+            at: state.next_offset,
+            event,
+        };
+        Self::push_metadata(&mut state, record.clone());
+        self.push_transcript(&mut state, record, 0);
+        self.input_ready.notify_all();
+    }
+
+    fn push_metadata(state: &mut TerminalState, record: TerminalRecord) {
+        const MAX_METADATA_RECORDS: usize = 1_024;
+        state.ring.push_back(record);
+        while state.ring.len() > MAX_METADATA_RECORDS {
+            let Some(dropped) = state.ring.pop_front() else {
+                break;
+            };
+            if let TerminalRecord::Output { end, bytes, .. } = dropped {
+                state.ring_bytes = state.ring_bytes.saturating_sub(bytes.len());
+                state.base_offset = state.base_offset.max(end);
+            }
+        }
+    }
+
+    fn push_transcript(&self, state: &mut TerminalState, record: TerminalRecord, bytes: u64) {
+        if !self.transcript_enabled || self.transcript_limit == 0 {
+            return;
+        }
+        let mut candidate = state.transcript.clone();
+        candidate.push(record);
+        let batch = TranscriptBatch {
+            version: TranscriptBatch::VERSION,
+            run: self.run,
+            attempt: self.attempt,
+            records: candidate,
+        };
+        if postcard::to_stdvec(&batch).is_ok_and(|encoded| encoded.len() <= self.transcript_limit) {
+            state.transcript = batch.records;
+        } else {
+            state.transcript_suppressed = state.transcript_suppressed.saturating_add(bytes);
+        }
+    }
+
+    fn enqueue(&self, event: InputEvent) -> Result<(), TerminalFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.attempt_ended || state.process_exited {
+            return Err(TerminalFailure::Ended);
+        }
+        if state.input_ended {
+            return Err(TerminalFailure::Ended);
+        }
+        if let InputEvent::Stdin(bytes) = &event {
+            let added = u64::try_from(bytes.len()).map_err(|_| TerminalFailure::InputLimit)?;
+            let next = state
+                .input_bytes
+                .checked_add(added)
+                .ok_or(TerminalFailure::InputLimit)?;
+            if added == 0 || next > self.input_limit {
+                return Err(TerminalFailure::InputLimit);
+            }
+            state.input_bytes = next;
+        }
+        if matches!(event, InputEvent::StdinEof) {
+            state.input_ended = true;
+        }
+        state.input.push_back(event);
+        self.input_ready.notify_one();
+        Ok(())
+    }
+}
+
+impl OutputSink for TerminalSession {
+    fn write(&self, channel: OutputChannel, bytes: &[u8]) -> Result<u64, TerminalFailure> {
+        if bytes.is_empty() {
+            return Ok(self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .next_offset);
+        }
+        let added = u64::try_from(bytes.len()).map_err(|_| TerminalFailure::OutputLimit)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.process_exited || state.attempt_ended {
+            return Err(TerminalFailure::Ended);
+        }
+        let start = state.next_offset;
+        let end = start
+            .checked_add(added)
+            .ok_or(TerminalFailure::OutputLimit)?;
+        if end > self.output_limit {
+            return Err(TerminalFailure::OutputLimit);
+        }
+        state.next_offset = end;
+        let record = TerminalRecord::Output {
+            start,
+            end,
+            channel,
+            bytes: bytes.to_vec(),
+        };
+        self.push_transcript(&mut state, record.clone(), added);
+        state.ring.push_back(record);
+        state.ring_bytes = state.ring_bytes.saturating_add(bytes.len());
+        while state.ring_bytes > self.ring_limit {
+            let Some(front) = state.ring.pop_front() else {
+                break;
+            };
+            match front {
+                TerminalRecord::Output {
+                    start,
+                    end,
+                    channel,
+                    bytes,
+                } => {
+                    let excess = state.ring_bytes.saturating_sub(self.ring_limit);
+                    if excess < bytes.len() {
+                        let tail = bytes
+                            .get(excess..)
+                            .ok_or(TerminalFailure::OutputLimit)?
+                            .to_vec();
+                        let shifted =
+                            start.saturating_add(u64::try_from(excess).unwrap_or(u64::MAX));
+                        state.ring.push_front(TerminalRecord::Output {
+                            start: shifted,
+                            end,
+                            channel,
+                            bytes: tail,
+                        });
+                        state.ring_bytes = self.ring_limit;
+                        state.base_offset = shifted;
+                        break;
+                    }
+                    state.ring_bytes = state.ring_bytes.saturating_sub(bytes.len());
+                    state.base_offset = end;
+                }
+                _ => {}
+            }
+        }
+        Ok(end)
+    }
+
+    fn resized(&self, cols: u16, rows: u16) -> Result<u64, TerminalFailure> {
+        if cols == 0 || rows == 0 {
+            return Err(TerminalFailure::Unsupported);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.process_exited || state.attempt_ended {
+            return Err(TerminalFailure::Ended);
+        }
+        let at = state.next_offset;
+        let record = TerminalRecord::Resized { at, cols, rows };
+        Self::push_metadata(&mut state, record.clone());
+        self.push_transcript(&mut state, record, 0);
+        Ok(at)
+    }
+
+    fn exited(&self, code: Option<i32>) -> Result<(), TerminalFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.process_exited {
+            return Ok(());
+        }
+        state.process_exited = true;
+        let record = TerminalRecord::ProcessExited {
+            at: state.next_offset,
+            code,
+        };
+        Self::push_metadata(&mut state, record.clone());
+        self.push_transcript(&mut state, record, 0);
+        self.input_ready.notify_all();
+        Ok(())
+    }
+
+    fn transcript(&self) -> Result<Option<Vec<u8>>, TerminalFailure> {
+        if !self.transcript_enabled {
+            return Ok(None);
+        }
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut records = state.transcript.clone();
+        if state.transcript_suppressed != 0 {
+            records.push(TerminalRecord::Suppressed {
+                at: state.next_offset,
+                dropped_bytes: state.transcript_suppressed,
+            });
+        }
+        let batch = TranscriptBatch {
+            version: TranscriptBatch::VERSION,
+            run: self.run,
+            attempt: self.attempt,
+            records,
+        };
+        let mut encoded = postcard::to_stdvec(&batch).map_err(|_| TerminalFailure::Unavailable)?;
+        if encoded.len() > self.transcript_limit {
+            let fallback = TranscriptBatch {
+                version: TranscriptBatch::VERSION,
+                run: self.run,
+                attempt: self.attempt,
+                records: vec![TerminalRecord::Suppressed {
+                    at: state.next_offset,
+                    dropped_bytes: state.next_offset,
+                }],
+            };
+            encoded = postcard::to_stdvec(&fallback).map_err(|_| TerminalFailure::Unavailable)?;
+        }
+        if encoded.len() > self.transcript_limit {
+            return Err(TerminalFailure::OutputLimit);
+        }
+        Ok(Some(encoded))
+    }
+}
+
+impl InputSource for TerminalSession {
+    fn receive(&self, timeout: std::time::Duration) -> Result<Option<InputEvent>, TerminalFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.input.is_empty() && !state.attempt_ended && !state.process_exited {
+            let waited = self
+                .input_ready
+                .wait_timeout(state, timeout)
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = waited.0;
+        }
+        if let Some(event) = state.input.pop_front() {
+            return Ok(Some(event));
+        }
+        if state.attempt_ended || state.process_exited {
+            return Err(TerminalFailure::Ended);
+        }
+        Ok(None)
+    }
+}
+
+/// Disposable view/controller handle. Dropping or detaching it never cancels
+/// the durable Run and never closes the performer.
+pub(crate) struct TerminalAttachment {
+    session: Arc<TerminalSession>,
+    detached: bool,
+}
+
+impl TerminalAttachment {
+    pub(crate) fn read(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+    ) -> Result<TerminalRead, TerminalFailure> {
+        if self.detached {
+            return Err(TerminalFailure::Detached);
+        }
+        let state = self
+            .session
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if cursor > state.next_offset {
+            return Err(TerminalFailure::Unavailable);
+        }
+        let mut remaining = max_bytes;
+        let mut splice = cursor.max(state.base_offset);
+        let mut records = Vec::new();
+        let dropped_bytes = state.base_offset.saturating_sub(cursor);
+        if dropped_bytes != 0 {
+            records.push(TerminalRecord::Gap {
+                after_seq: state.base_offset,
+                dropped_bytes,
+            });
+        }
+        for record in &state.ring {
+            match record {
+                TerminalRecord::Output {
+                    start,
+                    end,
+                    channel,
+                    bytes,
+                } if *end > cursor && remaining != 0 => {
+                    let skip = if cursor > *start {
+                        usize::try_from(cursor.saturating_sub(*start)).unwrap_or(usize::MAX)
+                    } else {
+                        0
+                    };
+                    let Some(tail) = bytes.get(skip..) else {
+                        continue;
+                    };
+                    let take = remaining.min(tail.len());
+                    let Some(part) = tail.get(..take) else {
+                        continue;
+                    };
+                    let part_start = start.saturating_add(u64::try_from(skip).unwrap_or(u64::MAX));
+                    let part_end =
+                        part_start.saturating_add(u64::try_from(take).unwrap_or(u64::MAX));
+                    records.push(TerminalRecord::Output {
+                        start: part_start,
+                        end: part_end,
+                        channel: *channel,
+                        bytes: part.to_vec(),
+                    });
+                    splice = splice.max(part_end);
+                    remaining = remaining.saturating_sub(take);
+                }
+                TerminalRecord::Resized { at, .. }
+                | TerminalRecord::ProcessExited { at, .. }
+                | TerminalRecord::AttemptEnded { at, .. }
+                | TerminalRecord::Suppressed { at, .. }
+                    if *at >= cursor =>
+                {
+                    records.push(record.clone());
+                }
+                _ => {}
+            }
+        }
+        Ok(TerminalRead {
+            base_offset: state.base_offset,
+            next_offset: splice,
+            dropped_bytes,
+            records,
+            ended: state.attempt_ended || state.process_exited,
+        })
+    }
+
+    pub(crate) fn stdin(&self, bytes: &[u8]) -> Result<(), TerminalFailure> {
+        if self.detached {
+            return Err(TerminalFailure::Detached);
+        }
+        self.session.enqueue(InputEvent::Stdin(bytes.to_vec()))
+    }
+
+    pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<(), TerminalFailure> {
+        if self.detached || cols == 0 || rows == 0 {
+            return Err(if self.detached {
+                TerminalFailure::Detached
+            } else {
+                TerminalFailure::Unsupported
+            });
+        }
+        self.session.enqueue(InputEvent::Resize { cols, rows })
+    }
+
+    pub(crate) fn interrupt(&self) -> Result<(), TerminalFailure> {
+        if self.detached {
+            return Err(TerminalFailure::Detached);
+        }
+        self.session.enqueue(InputEvent::Interrupt)
+    }
+
+    pub(crate) fn end_input(&self) -> Result<(), TerminalFailure> {
+        if self.detached {
+            return Err(TerminalFailure::Detached);
+        }
+        self.session.enqueue(InputEvent::StdinEof)
+    }
+
+    pub(crate) fn detach(&mut self) {
+        if self.detached {
+            return;
+        }
+        self.detached = true;
+        let mut state = self
+            .session
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.attached = state.attached.saturating_sub(1);
+    }
+}
+
+impl Drop for TerminalAttachment {
+    fn drop(&mut self) {
+        self.detach();
+    }
+}
+
 /// The capability facets a host lends one dispatched Attempt.
 ///
 /// Every field is optional on purpose: absence is the refusal, and a facet
@@ -1470,6 +2136,38 @@ pub trait ContentDelegate {
 pub struct Facets<'a> {
     pub find: Option<&'a dyn FindDelegate>,
     pub content: Option<&'a dyn ContentDelegate>,
+    pub output: Option<&'a dyn OutputSink>,
+    pub input: Option<&'a dyn InputSource>,
+}
+
+/// Activation-owned control for one locally begun Attempt.
+///
+/// The handle is registered before invocation and remains addressable until
+/// completion is durably recorded. Keeping the flag in this owned handle is
+/// what lets a later `CancelAsked` reach a performer already running on a
+/// different thread. Interactive input, resize, and signal controls extend
+/// this same handle rather than introducing another Attempt registry.
+#[derive(Clone, Default)]
+pub struct AttemptControl {
+    cancel_asked: Arc<AtomicBool>,
+}
+
+impl AttemptControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancel_asked.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_asked.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn cancel_flag(&self) -> &AtomicBool {
+        &self.cancel_asked
+    }
 }
 
 /// A bounded, authenticated view of one admitted local Attempt.
@@ -1490,6 +2188,8 @@ pub struct Context<'a> {
     output_blobs: Vec<Vec<u8>>,
     find: Option<&'a dyn FindDelegate>,
     content: Option<&'a dyn ContentDelegate>,
+    output: Option<&'a dyn OutputSink>,
+    input: Option<&'a dyn InputSource>,
     /// Declared query work already admitted, in wall milliseconds. Charged
     /// from each admitted query's own bound before evaluation, so the sum a
     /// handler can ask for never exceeds the Attempt's wall budget even
@@ -1535,6 +2235,27 @@ pub trait HandlerContext {
     fn save_checkpoint_bytes(&mut self, bytes: Vec<u8>) -> Result<(), Failure>;
     fn start_child(&mut self, child: Start) -> Result<(), Failure>;
     fn stage_output(&mut self, bytes: Vec<u8>) -> Result<(), Failure>;
+    fn mode(&self) -> Mode {
+        Mode::Unary
+    }
+    fn terminal(&self) -> TerminalSpec {
+        TerminalSpec::disabled()
+    }
+    fn write_output(&self, _channel: OutputChannel, _bytes: &[u8]) -> Result<u64, Failure> {
+        Err(Failure::OutputUnavailable)
+    }
+    fn output_resized(&self, _cols: u16, _rows: u16) -> Result<u64, Failure> {
+        Err(Failure::OutputUnavailable)
+    }
+    fn observe_exit(&self, _code: Option<i32>) -> Result<(), Failure> {
+        Err(Failure::OutputUnavailable)
+    }
+    fn receive_input(&self, _timeout: std::time::Duration) -> Result<Option<InputEvent>, Failure> {
+        Err(Failure::InputUnavailable)
+    }
+    fn continuation_input(&self) -> Option<&ContinuationInput> {
+        None
+    }
 }
 
 impl HandlerContext for Context<'_> {
@@ -1626,6 +2347,46 @@ impl HandlerContext for Context<'_> {
     fn stage_output(&mut self, bytes: Vec<u8>) -> Result<(), Failure> {
         Context::stage_output(self, bytes)
     }
+
+    fn mode(&self) -> Mode {
+        self.run.started.mode
+    }
+
+    fn terminal(&self) -> TerminalSpec {
+        self.run.started.terminal
+    }
+
+    fn write_output(&self, channel: OutputChannel, bytes: &[u8]) -> Result<u64, Failure> {
+        self.output
+            .ok_or(Failure::OutputUnavailable)?
+            .write(channel, bytes)
+            .map_err(Failure::Terminal)
+    }
+
+    fn output_resized(&self, cols: u16, rows: u16) -> Result<u64, Failure> {
+        self.output
+            .ok_or(Failure::OutputUnavailable)?
+            .resized(cols, rows)
+            .map_err(Failure::Terminal)
+    }
+
+    fn observe_exit(&self, code: Option<i32>) -> Result<(), Failure> {
+        self.output
+            .ok_or(Failure::OutputUnavailable)?
+            .exited(code)
+            .map_err(Failure::Terminal)
+    }
+
+    fn receive_input(&self, timeout: std::time::Duration) -> Result<Option<InputEvent>, Failure> {
+        self.input
+            .ok_or(Failure::InputUnavailable)?
+            .receive(timeout)
+            .map_err(Failure::Terminal)
+    }
+
+    fn continuation_input(&self) -> Option<&ContinuationInput> {
+        self.attempt.continuation.as_ref()
+    }
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -1670,6 +2431,8 @@ impl<'a> Context<'a> {
             output_blobs: Vec::new(),
             find: None,
             content: None,
+            output: None,
+            input: None,
             query_wall_charged: 0,
             checkpoint_blobs: Vec::new(),
         })
@@ -1688,6 +2451,16 @@ impl<'a> Context<'a> {
     /// pretending empty bytes answered.
     pub(crate) fn with_content(mut self, delegate: &'a dyn ContentDelegate) -> Self {
         self.content = Some(delegate);
+        self
+    }
+
+    pub(crate) fn with_output(mut self, sink: &'a dyn OutputSink) -> Self {
+        self.output = Some(sink);
+        self
+    }
+
+    pub(crate) fn with_input(mut self, source: &'a dyn InputSource) -> Self {
+        self.input = Some(source);
         self
     }
 
@@ -1718,7 +2491,12 @@ impl<'a> Context<'a> {
                 .attempt
                 .checkpoint
                 .as_ref()
-                .is_some_and(|checkpoint| checkpoint.content == *content);
+                .is_some_and(|checkpoint| checkpoint.content == *content)
+            || self
+                .attempt
+                .continuation
+                .as_ref()
+                .is_some_and(|continuation| continuation.input.content.contains(content));
         if !named {
             return Err(Failure::ContentRefused);
         }
@@ -1974,6 +2752,8 @@ pub struct Completion {
     checkpoint_blobs: Vec<(CheckpointRef, Vec<u8>)>,
     children: Vec<Start>,
     output_blobs: Vec<Vec<u8>>,
+    transcript_blob: Option<Vec<u8>>,
+    transcript: Option<ContentRef>,
 }
 
 impl Completion {
@@ -1991,6 +2771,20 @@ impl Completion {
 
     pub fn output_blobs(&self) -> &[Vec<u8>] {
         &self.output_blobs
+    }
+
+    pub fn transcript_blob(&self) -> Option<&[u8]> {
+        self.transcript_blob.as_deref()
+    }
+
+    /// Bind the one host-sealed transcript artifact. It is deliberately
+    /// separate from handler output content and its payload contract.
+    pub fn bind_transcript_content(&mut self, content: ContentRef) -> Result<(), Failure> {
+        if self.transcript_blob.is_none() || self.transcript.is_some() {
+            return Err(Failure::InvalidOutcome);
+        }
+        self.transcript = Some(content);
+        Ok(())
     }
 
     /// Bind ingested output ContentRefs after Runtime seals staged blobs.
@@ -2071,6 +2865,7 @@ impl Completion {
                 terminal: self.candidate.terminal,
                 usage: self.candidate.usage.clone(),
                 evidence: self.candidate.evidence.clone(),
+                transcript: self.transcript,
             }),
         )?);
         Ok(events)
@@ -2089,6 +2884,16 @@ pub enum Failure {
     /// The operating system refused process control — spawn, pipe, or wait.
     /// Distinct from [`Failure::Handler`]: the handler never ran.
     Os,
+    /// Unary stdout crossed the Attempt's declared progress-byte ceiling.
+    /// The child is stopped and its partial prefix is discarded: bounded
+    /// output must never be presented as a complete successful Outcome.
+    OutputLimit,
+    /// A non-Unary handler was invoked without the host output facade.
+    OutputUnavailable,
+    /// An Interactive handler was invoked without the host input facade.
+    InputUnavailable,
+    /// A typed terminal boundary refusal.
+    Terminal(TerminalFailure),
     InvalidContext,
     InvalidOutcome,
     InvalidCheckpoint,
@@ -2170,10 +2975,64 @@ pub struct Subprocess {
     output: SchemaRef,
     program: std::path::PathBuf,
     args: Vec<String>,
+    working_directory: std::path::PathBuf,
+    /// Composition-declared client environment for the outer process only.
+    /// The ambient daemon environment is always cleared first.
+    environment: Vec<(String, String)>,
 }
 
 impl Subprocess {
-    pub fn new(spec: &Spec, build: &Build, program: std::path::PathBuf, args: Vec<String>) -> Self {
+    fn consume_process_output(
+        context: &dyn HandlerContext,
+        mode: Mode,
+        ceiling: usize,
+        observed: &mut usize,
+        stdout: &mut Vec<u8>,
+        channel: OutputChannel,
+        bytes: &[u8],
+    ) -> Result<(), Failure> {
+        if matches!(mode, Mode::Stream) {
+            *observed = observed.saturating_add(bytes.len());
+            if *observed > ceiling {
+                return Err(Failure::OutputLimit);
+            }
+            context.write_output(channel, bytes)?;
+        } else if matches!(channel, OutputChannel::Stdout) {
+            if stdout.len().saturating_add(bytes.len()) > ceiling {
+                return Err(Failure::OutputLimit);
+            }
+            stdout.extend_from_slice(bytes);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn stop_pty_child(
+        child: &mut std::process::Child,
+        writer: std::fs::File,
+        output: &std::sync::mpsc::Receiver<Vec<u8>>,
+        reader: std::thread::JoinHandle<()>,
+    ) {
+        Self::stop_tree(child);
+        let _ = child.wait();
+        drop(writer);
+        while !reader.is_finished() {
+            match output.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while output.try_recv().is_ok() {}
+        let _ = reader.join();
+    }
+
+    pub fn new(
+        spec: &Spec,
+        build: &Build,
+        program: std::path::PathBuf,
+        args: Vec<String>,
+        working_directory: std::path::PathBuf,
+    ) -> Self {
         Self {
             binding: HandlerBinding {
                 spec: build.spec.clone(),
@@ -2185,7 +3044,17 @@ impl Subprocess {
             output: spec.output.schema.clone(),
             program,
             args,
+            working_directory,
+            environment: Vec::new(),
         }
+    }
+
+    /// Add the exact bounded environment required by a composition-owned
+    /// outer runtime client (for example rootless Podman). These values are
+    /// not ambient inheritance and do not imply container environment.
+    pub fn with_environment(mut self, environment: Vec<(String, String)>) -> Self {
+        self.environment = environment;
+        self
     }
 
     /// What this performer actually enforces: a real process boundary the
@@ -2320,6 +3189,249 @@ impl Subprocess {
             let _ = child;
         }
     }
+
+    /// Run one Interactive Attempt behind a real local PTY.
+    #[cfg(unix)]
+    fn handle_pty(&self, context: &mut dyn HandlerContext) -> Result<Candidate, Failure> {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
+        use std::os::unix::process::CommandExt as _;
+
+        if context.cancel_asked() {
+            return Err(Failure::Cancelled);
+        }
+        let mut master: RawFd = -1;
+        let mut slave: RawFd = -1;
+        let mut initial = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: all pointers name initialized storage for the documented
+        // openpty call; null termios requests the platform defaults.
+        if unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut initial,
+            )
+        } != 0
+        {
+            return Err(Failure::Os);
+        }
+        // SAFETY: openpty returned owned descriptors. Each successful dup is
+        // transferred exactly once into a File/Stdio owner below.
+        let stdin_fd = unsafe { libc::dup(slave) };
+        let stdout_fd = unsafe { libc::dup(slave) };
+        if stdin_fd < 0 || stdout_fd < 0 {
+            // SAFETY: these are live descriptors returned above; close is the
+            // only owner action on this error path.
+            unsafe {
+                libc::close(master);
+                libc::close(slave);
+                if stdin_fd >= 0 {
+                    libc::close(stdin_fd);
+                }
+                if stdout_fd >= 0 {
+                    libc::close(stdout_fd);
+                }
+            }
+            return Err(Failure::Os);
+        }
+        // SAFETY: ownership of the three distinct descriptors moves to File.
+        let stdin_file = unsafe { std::fs::File::from_raw_fd(stdin_fd) };
+        let stdout_file = unsafe { std::fs::File::from_raw_fd(stdout_fd) };
+        let stderr_file = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut command = std::process::Command::new(&self.program);
+        command
+            .args(&self.args)
+            .env_clear()
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&self.working_directory)
+            .stdin(std::process::Stdio::from(stdin_file))
+            .stdout(std::process::Stdio::from(stdout_file))
+            .stderr(std::process::Stdio::from(stderr_file));
+        Self::disinherit_capabilities(&mut command);
+        // SAFETY: setsid/ioctl are async-signal-safe syscalls in the forked
+        // child. stdin has already been wired to the slave side of this PTY.
+        unsafe {
+            command.pre_exec(|| {
+                let request: libc::c_ulong = libc::TIOCSCTTY.into();
+                if libc::setsid() < 0 || libc::ioctl(libc::STDIN_FILENO, request, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                // SAFETY: parent still owns the master descriptor.
+                unsafe { libc::close(master) };
+                return Err(Failure::Os);
+            }
+        };
+        // SAFETY: master is the sole remaining raw owner after spawn.
+        let reader_file = unsafe { std::fs::File::from_raw_fd(master) };
+        let mut writer_file = match reader_file.try_clone() {
+            Ok(file) => file,
+            Err(_) => {
+                Self::stop_tree(&child);
+                let _ = child.wait();
+                drop(reader_file);
+                return Err(Failure::Os);
+            }
+        };
+        let control_fd = writer_file.as_raw_fd();
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+        let reader = std::thread::spawn(move || {
+            let mut reader_file = reader_file;
+            let mut chunk = [0u8; 8 * 1024];
+            loop {
+                match reader_file.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        let Some(bytes) = chunk.get(..read) else {
+                            break;
+                        };
+                        if output_tx.send(bytes.to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let began = std::time::Instant::now();
+        let wall = std::time::Duration::from_millis(context.limits().wall_millis);
+        let status = loop {
+            while let Ok(bytes) = output_rx.try_recv() {
+                if let Err(failure) = context.write_output(OutputChannel::Merged, &bytes) {
+                    Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                    return Err(failure);
+                }
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(_) => {
+                    Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                    return Err(Failure::Os);
+                }
+            }
+            match context.receive_input(std::time::Duration::from_millis(10)) {
+                Ok(Some(InputEvent::Stdin(bytes))) => {
+                    if writer_file.write_all(&bytes).is_err() || writer_file.flush().is_err() {
+                        Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                        return Err(Failure::Os);
+                    }
+                }
+                Ok(Some(InputEvent::Resize { cols, rows })) => {
+                    let size = libc::winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    // SAFETY: control_fd is this live PTY master and size is a
+                    // valid winsize value for TIOCSWINSZ.
+                    if unsafe { libc::ioctl(control_fd, libc::TIOCSWINSZ, &size) } < 0 {
+                        Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                        return Err(Failure::Terminal(TerminalFailure::Unsupported));
+                    }
+                    if let Err(failure) = context.output_resized(cols, rows) {
+                        Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                        return Err(failure);
+                    }
+                }
+                Ok(Some(InputEvent::Interrupt)) => {
+                    // Address the PTY's foreground process group, not a pid.
+                    // SAFETY: tcgetpgrp/kill take scalar descriptors/ids.
+                    let group = unsafe { libc::tcgetpgrp(control_fd) };
+                    if group <= 0 || unsafe { libc::kill(-group, libc::SIGINT) } < 0 {
+                        Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                        return Err(Failure::Terminal(TerminalFailure::Unavailable));
+                    }
+                }
+                Ok(Some(InputEvent::StdinEof)) => {
+                    // POSIX canonical PTYs interpret VEOF at the terminal
+                    // discipline. The output side stays open for final bytes.
+                    if writer_file.write_all(&[0x04]).is_err() || writer_file.flush().is_err() {
+                        Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                        return Err(Failure::Os);
+                    }
+                }
+                Ok(None) => {}
+                Err(Failure::Terminal(TerminalFailure::Ended)) => {}
+                Err(failure) => {
+                    Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                    return Err(failure);
+                }
+            }
+            if context.cancel_asked() {
+                Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                return Err(Failure::Cancelled);
+            }
+            if began.elapsed() >= wall {
+                Self::stop_pty_child(&mut child, writer_file, &output_rx, reader);
+                return Err(Failure::Wall);
+            }
+        };
+        drop(writer_file);
+        let mut output_failure = None;
+        while !reader.is_finished() {
+            match output_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(bytes) => {
+                    if output_failure.is_none() {
+                        if let Err(failure) = context.write_output(OutputChannel::Merged, &bytes) {
+                            output_failure = Some(failure);
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while let Ok(bytes) = output_rx.try_recv() {
+            if output_failure.is_none() {
+                if let Err(failure) = context.write_output(OutputChannel::Merged, &bytes) {
+                    output_failure = Some(failure);
+                }
+            }
+        }
+        let _ = reader.join();
+        if let Some(failure) = output_failure {
+            return Err(failure);
+        }
+        context.observe_exit(status.code())?;
+        Ok(Candidate {
+            output: self.output.clone(),
+            inline: Vec::new(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: if status.success() {
+                TerminalClass::Succeeded
+            } else {
+                TerminalClass::ApplicationFailed
+            },
+            usage: SchemaId::parse(WALL_TIME_MS)
+                .map(|name| {
+                    vec![Resource {
+                        name,
+                        amount: wall_claim(began.elapsed()),
+                    }]
+                })
+                .unwrap_or_default(),
+            evidence: Vec::new(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn handle_pty(&self, _context: &mut dyn HandlerContext) -> Result<Candidate, Failure> {
+        Err(Failure::Terminal(TerminalFailure::Unsupported))
+    }
 }
 
 impl Handler for Subprocess {
@@ -2327,8 +3439,15 @@ impl Handler for Subprocess {
         &self.binding
     }
 
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::Process
+    }
+
     fn handle(&self, context: &mut dyn HandlerContext) -> Result<Candidate, Failure> {
         use std::io::{Read, Write};
+        if matches!(context.mode(), Mode::Interactive) {
+            return self.handle_pty(context);
+        }
         if context.cancel_asked() {
             return Err(Failure::Cancelled);
         }
@@ -2336,9 +3455,12 @@ impl Handler for Subprocess {
         let mut command = std::process::Command::new(&self.program);
         command
             .args(&self.args)
+            .env_clear()
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(&self.working_directory)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::piped());
         Self::own_process_group(&mut command);
         Self::disinherit_capabilities(&mut command);
         let mut child = command.spawn().map_err(|_| Failure::Os)?;
@@ -2348,29 +3470,73 @@ impl Handler for Subprocess {
             let _ = stdin.write_all(&input);
         });
         let mut stdout = child.stdout.take().ok_or(Failure::Os)?;
+        let mut stderr = child.stderr.take().ok_or(Failure::Os)?;
         let ceiling = usize::try_from(context.limits().progress_bytes).unwrap_or(usize::MAX);
-        let collector = std::thread::spawn(move || {
-            let mut collected = Vec::new();
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<(OutputChannel, Vec<u8>)>(32);
+        let stdout_tx = output_tx.clone();
+        let stdout_collector = std::thread::spawn(move || {
             let mut chunk = [0u8; 8 * 1024];
             loop {
                 match stdout.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(read) => {
-                        if collected.len().saturating_add(read) > ceiling {
-                            break;
-                        }
                         let Some(filled) = chunk.get(..read) else {
                             break;
                         };
-                        collected.extend_from_slice(filled);
+                        if stdout_tx
+                            .send((OutputChannel::Stdout, filled.to_vec()))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
             }
-            collected
+        });
+        let stderr_collector = std::thread::spawn(move || {
+            let mut chunk = [0u8; 8 * 1024];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        let Some(filled) = chunk.get(..read) else {
+                            break;
+                        };
+                        if output_tx
+                            .send((OutputChannel::Stderr, filled.to_vec()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
         });
         let began = std::time::Instant::now();
+        let mode = context.mode();
+        let mut observed = 0usize;
+        let mut collected = Vec::new();
         let status = loop {
+            while let Ok((channel, bytes)) = output_rx.try_recv() {
+                if let Err(failure) = Self::consume_process_output(
+                    context,
+                    mode,
+                    ceiling,
+                    &mut observed,
+                    &mut collected,
+                    channel,
+                    &bytes,
+                ) {
+                    Self::stop_tree(&child);
+                    let _ = child.wait();
+                    let _ = feeder.join();
+                    let _ = stdout_collector.join();
+                    let _ = stderr_collector.join();
+                    return Err(failure);
+                }
+            }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) => {}
@@ -2378,7 +3544,8 @@ impl Handler for Subprocess {
                     Self::stop_tree(&child);
                     let _ = child.wait();
                     let _ = feeder.join();
-                    let _ = collector.join();
+                    let _ = stdout_collector.join();
+                    let _ = stderr_collector.join();
                     return Err(Failure::Os);
                 }
             }
@@ -2386,20 +3553,71 @@ impl Handler for Subprocess {
                 Self::stop_tree(&child);
                 let _ = child.wait();
                 let _ = feeder.join();
-                let _ = collector.join();
+                let _ = stdout_collector.join();
+                let _ = stderr_collector.join();
                 return Err(Failure::Cancelled);
             }
             if began.elapsed() >= wall {
                 Self::stop_tree(&child);
                 let _ = child.wait();
                 let _ = feeder.join();
-                let _ = collector.join();
+                let _ = stdout_collector.join();
+                let _ = stderr_collector.join();
                 return Err(Failure::Wall);
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         let _ = feeder.join();
-        let inline = collector.join().unwrap_or_default();
+        let mut output_failure = None;
+        while !stdout_collector.is_finished() || !stderr_collector.is_finished() {
+            match output_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok((channel, bytes)) => {
+                    if output_failure.is_none() {
+                        if let Err(failure) = Self::consume_process_output(
+                            context,
+                            mode,
+                            ceiling,
+                            &mut observed,
+                            &mut collected,
+                            channel,
+                            &bytes,
+                        ) {
+                            output_failure = Some(failure);
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while let Ok((channel, bytes)) = output_rx.try_recv() {
+            if output_failure.is_none() {
+                if let Err(failure) = Self::consume_process_output(
+                    context,
+                    mode,
+                    ceiling,
+                    &mut observed,
+                    &mut collected,
+                    channel,
+                    &bytes,
+                ) {
+                    output_failure = Some(failure);
+                }
+            }
+        }
+        let _ = stdout_collector.join();
+        let _ = stderr_collector.join();
+        if let Some(failure) = output_failure {
+            return Err(failure);
+        }
+        if matches!(mode, Mode::Stream) {
+            context.observe_exit(status.code())?;
+        }
+        let inline = if matches!(mode, Mode::Stream) {
+            Vec::new()
+        } else {
+            collected
+        };
         let usage = SchemaId::parse(WALL_TIME_MS)
             .map(|name| {
                 vec![Resource {
@@ -2464,12 +3682,18 @@ impl InProcess {
         candidate.validate_with_spec(selection.spec)?;
         context.validate_staged(selection.spec, selection.build)?;
         let (checkpoints, checkpoint_blobs, children, output_blobs) = context.take_staged();
+        let transcript_blob = match context.output {
+            Some(output) => output.transcript().map_err(Failure::Terminal)?,
+            None => None,
+        };
         Ok(Completion {
             candidate,
             checkpoints,
             checkpoint_blobs,
             children,
             output_blobs,
+            transcript_blob,
+            transcript: None,
         })
     }
 }
@@ -2577,6 +3801,11 @@ impl ReservedBodyReader for replica::ReadSnapshot {
 pub(crate) enum ReadFailure {
     Invalid(Invalid),
     Body(crate::world::BodyReadFailure),
+    /// Durable Run truth belongs to an intentionally unsupported schema
+    /// generation. This is a compatibility boundary, not corruption.
+    UnsupportedRunSchema {
+        found: u32,
+    },
 }
 
 impl From<Invalid> for ReadFailure {
@@ -2652,6 +3881,22 @@ impl<'a> Dispatcher<'a> {
             .package
             .select(&unresolved.run, attempt)
             .map_err(DispatchFailure::Selection)?;
+        if !matches!(selection.spec.mode, Mode::Unary)
+            && matches!(
+                selection.handler.enforcement(),
+                Enforcement::Advisory | Enforcement::Measured
+            )
+        {
+            return Err(DispatchFailure::Backend(Failure::Terminal(
+                TerminalFailure::Unsupported,
+            )));
+        }
+        if !matches!(selection.spec.mode, Mode::Unary) && facets.output.is_none() {
+            return Err(DispatchFailure::Backend(Failure::OutputUnavailable));
+        }
+        if matches!(selection.spec.mode, Mode::Interactive) && facets.input.is_none() {
+            return Err(DispatchFailure::Backend(Failure::InputUnavailable));
+        }
         let links = selected_links(&selection);
         let mut context = Context::new(
             &unresolved.run,
@@ -2666,6 +3911,12 @@ impl<'a> Dispatcher<'a> {
         }
         if let Some(delegate) = facets.content {
             context = context.with_content(delegate);
+        }
+        if let Some(output) = facets.output {
+            context = context.with_output(output);
+        }
+        if let Some(input) = facets.input {
+            context = context.with_input(input);
         }
         let completion = self
             .backend
@@ -2754,6 +4005,7 @@ pub struct PerformReport {
 pub enum DispatchFailure {
     Invalid(Invalid),
     BodyRead(crate::world::BodyReadFailure),
+    UnsupportedRunSchema { found: u32 },
     Run(RunId),
     Attempt(AttemptId),
     NotBegan(AttemptId),
@@ -2775,6 +4027,7 @@ impl From<ReadFailure> for DispatchFailure {
         match value {
             ReadFailure::Invalid(invalid) => Self::Invalid(invalid),
             ReadFailure::Body(failure) => Self::BodyRead(failure),
+            ReadFailure::UnsupportedRunSchema { found } => Self::UnsupportedRunSchema { found },
         }
     }
 }
@@ -2930,6 +4183,10 @@ pub struct Started {
     pub world: WorldId,
     pub run: RunId,
     pub spec: SchemaRef,
+    /// Interaction shape and terminal bounds copied from the exact admitted
+    /// Spec so a Run remains interpretable after descriptor movement.
+    pub mode: Mode,
+    pub terminal: TerminalSpec,
     pub world_implementation: [u8; 32],
     pub build: BuildId,
     pub invoker: ActorId,
@@ -2940,6 +4197,7 @@ pub struct Started {
     pub input_digest: [u8; 32],
     pub input_content: Vec<ContentRef>,
     pub input_content_bytes: u64,
+    pub max_additional_input_bytes: u64,
     pub resources: Vec<Resource>,
     pub limits: Limits,
     pub request: [u8; 16],
@@ -2972,6 +4230,8 @@ pub struct Leased {
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
+    /// Bounded, root-stamped input committed by an explicit continuation Try.
+    pub continuation: Option<ContinuationInput>,
 }
 
 /// An executor's durable claim that one admitted Attempt began.
@@ -3013,6 +4273,9 @@ pub struct Returned {
     pub usage: Vec<Resource>,
     /// Immutable validation or attestation artifacts, sorted by ContentRef.
     pub evidence: Vec<ContentRef>,
+    /// Host-authored terminal recording. This is deliberately not handler
+    /// output and is validated against `TerminalSpec`, not `PayloadSpec`.
+    pub transcript: Option<ContentRef>,
 }
 
 /// Why an Attempt terminated without returning an Outcome.
@@ -3244,6 +4507,17 @@ impl RunEvent {
                     .limits
                     .validate()
                     .map_err(|_| Invalid::InvalidEvent("limits"))?;
+                started
+                    .terminal
+                    .validate()
+                    .map_err(|_| Invalid::InvalidEvent("terminal"))?;
+                if started.max_additional_input_bytes > MAX_CONTENT_LEN
+                    || matches!(started.mode, Mode::Unary | Mode::Stream)
+                        && (started.max_additional_input_bytes != 0
+                            || started.terminal.max_live_input_bytes != 0)
+                {
+                    return Err(Invalid::InvalidEvent("mode"));
+                }
             }
             RunEventKind::Leased(event) => {
                 require_predecessors(&self.predecessors)?;
@@ -3262,6 +4536,7 @@ impl RunEvent {
                     limits: event.limits,
                     lease: event.lease.clone(),
                     checkpoint: event.checkpoint.clone(),
+                    continuation: event.continuation.clone(),
                 }
                 .validate()
                 .map_err(|_| Invalid::InvalidEvent("leased"))?;
@@ -3495,6 +4770,7 @@ pub struct Outcome {
     pub terminal: TerminalClass,
     pub usage: Vec<Resource>,
     pub evidence: Vec<ContentRef>,
+    pub transcript: Option<ContentRef>,
 }
 
 impl Outcome {
@@ -3533,6 +4809,7 @@ pub struct Attempt {
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
+    pub continuation: Option<ContinuationInput>,
     pub began: Vec<Fact<Began>>,
     pub checkpoints: Vec<Fact<Saved>>,
     pub outcomes: Vec<Outcome>,
@@ -3661,6 +4938,9 @@ pub struct WorkReturn {
     /// Content identities of returned output. Bytes stay behind the World.
     #[serde(default)]
     pub output_content: Vec<ContentRef>,
+    /// Host-authored terminal recording, separate from handler output.
+    #[serde(default)]
+    pub transcript: Option<ContentRef>,
 }
 
 /// One Attempt failure fact an actor can branch on.
@@ -3707,6 +4987,10 @@ pub struct WorkState {
     pub run: RunId,
     pub spec: SchemaRef,
     pub build: BuildId,
+    /// The Actor/device that authored the durable Start. Execution services
+    /// act as themselves; these facts make impersonation auditable.
+    pub invoker: ActorId,
+    pub device: DeviceId,
     pub heads: Vec<EventId>,
     pub event_count: u64,
     pub unresolved: bool,
@@ -3743,6 +5027,7 @@ impl WorkState {
                         event: outcome.event,
                         terminal: outcome.terminal,
                         output_content: outcome.output_content.clone(),
+                        transcript: outcome.transcript.clone(),
                     })
                     .collect(),
                 failed: attempt
@@ -3765,6 +5050,8 @@ impl WorkState {
             run: run.id,
             spec: run.started.spec.clone(),
             build: run.started.build,
+            invoker: run.started.invoker.clone(),
+            device: run.started.device.clone(),
             heads: run.heads.clone(),
             event_count,
             unresolved: run.is_unresolved(),
@@ -3808,6 +5095,11 @@ pub enum WorkRefusal {
     /// The exact protected Run/active image could not be obtained under the
     /// Station's key, integrity, or memory policy. This is never `NotFound`.
     BodyRead(crate::world::BodyReadFailure),
+    /// The Run exists, but was written by a deliberately unsupported durable
+    /// schema generation. It is quarantined from dispatch and not corruption.
+    UnsupportedRunSchema {
+        found: u32,
+    },
     Session(crate::world::Failure),
     NotFound(RunId),
     Unsupported(&'static str),
@@ -3832,6 +5124,7 @@ impl From<ReadFailure> for WorkRefusal {
         match value {
             ReadFailure::Invalid(invalid) => Self::Invalid(invalid),
             ReadFailure::Body(failure) => Self::BodyRead(failure),
+            ReadFailure::UnsupportedRunSchema { found } => Self::UnsupportedRunSchema { found },
         }
     }
 }
@@ -3881,6 +5174,7 @@ impl Attempt {
             limits: leased.limits,
             lease: leased.lease.clone(),
             checkpoint: leased.checkpoint.clone(),
+            continuation: leased.continuation.clone(),
             began: Vec::new(),
             checkpoints: Vec::new(),
             outcomes: Vec::new(),
@@ -3996,6 +5290,7 @@ impl Run {
                         terminal: value.terminal,
                         usage: value.usage.clone(),
                         evidence: value.evidence.clone(),
+                        transcript: value.transcript,
                     });
                 }
                 RunEventKind::Failed(value) => {
@@ -4067,6 +5362,25 @@ impl Run {
             checkpoint_count = checkpoint_count
                 .checked_add(count)
                 .ok_or(Invalid::InvalidEvent("checkpoints"))?;
+            if let Some(continuation) = &attempt.continuation {
+                let inline = u64::try_from(continuation.input.inline.len())
+                    .map_err(|_| Invalid::InvalidEvent("continuation input"))?;
+                let total = inline
+                    .checked_add(continuation.input.content_bytes)
+                    .ok_or(Invalid::InvalidEvent("continuation input"))?;
+                if total == 0
+                    || total > started.max_additional_input_bytes
+                    || !matches!(started.mode, Mode::Interactive)
+                {
+                    return Err(Invalid::InvalidEvent("continuation input"));
+                }
+            }
+            if attempt.outcomes.iter().any(|outcome| {
+                outcome.transcript.is_some()
+                    && !matches!(started.terminal.transcript, Transcript::OnReturn)
+            }) {
+                return Err(Invalid::InvalidEvent("transcript"));
+            }
             attempt.sort_facts();
         }
         if checkpoint_count > started.limits.checkpoints {
@@ -4159,7 +5473,19 @@ pub(crate) fn scan_unresolved(
             if active_run_body_key(world, id) != *key {
                 return Err(Invalid::InvalidEvent("active run identity").into());
             }
-            let Some((run, start, _)) = read_committed_run(snapshot, world, id)? else {
+            let committed = match read_committed_run(snapshot, world, id) {
+                // Generation 1 Runs cannot be losslessly re-identified after
+                // the continuation/transcript schema cutover. Keep their
+                // active marker as inert historical truth and allow newer
+                // Runs to dispatch; direct inspection remains a typed refusal.
+                Err(ReadFailure::UnsupportedRunSchema { found })
+                    if found < RUN_BODY_SCHEMA_VERSION =>
+                {
+                    continue;
+                }
+                result => result?,
+            };
+            let Some((run, start, _)) = committed else {
                 return Err(Invalid::InvalidEvent("active run target").into());
             };
             if !run.is_unresolved() {
@@ -4194,11 +5520,15 @@ pub(crate) fn read_committed_run(
         return Ok(None);
     };
     if binding.schema.as_str() != RUN_BODY_SCHEMA
-        || binding.schema_version != RUN_BODY_SCHEMA_VERSION
         || binding.encoding.as_str() != BODY_ENCODING
         || binding.mutation_model != MUTATION_COLLABORATIVE
     {
         return Err(Invalid::InvalidEvent("run binding").into());
+    }
+    if binding.schema_version != RUN_BODY_SCHEMA_VERSION {
+        return Err(ReadFailure::UnsupportedRunSchema {
+            found: binding.schema_version,
+        });
     }
     let view = snapshot
         .read_collaborative(&key)?
@@ -4848,6 +6178,17 @@ pub struct CheckpointRef {
     pub sequence: u32,
 }
 
+/// Additional input committed by an explicit continuation Try.
+///
+/// The manifest root is the immutable interpretation coordinate at which the
+/// input was admitted. Live keystrokes never enter this value and never spend
+/// its durable byte budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationInput {
+    pub manifest_root: [u8; 32],
+    pub input: Input,
+}
+
 /// Finite ceilings for one physical Attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptLimits {
@@ -4876,6 +6217,7 @@ pub struct Try {
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
+    pub continuation: Option<ContinuationInput>,
 }
 
 fn validate_resources(resources: &[Resource], owner: &'static str) -> Result<(), Invalid> {
@@ -4905,7 +6247,7 @@ fn validate_resources(resources: &[Resource], owner: &'static str) -> Result<(),
 }
 
 impl Input {
-    fn validate(&self) -> Result<(), Invalid> {
+    pub(crate) fn validate(&self) -> Result<(), Invalid> {
         if self.inline.len() > MAX_BODY_BYTES
             || self.content.len() > MAX_CONTENT_REFS_PER_BODY
             || (self.content.is_empty() != (self.content_bytes == 0))
@@ -4920,7 +6262,7 @@ impl Input {
         Ok(())
     }
 
-    fn validate_with(&self, payload: &PayloadSpec) -> Result<(), Invalid> {
+    pub(crate) fn validate_with(&self, payload: &PayloadSpec) -> Result<(), Invalid> {
         self.validate()?;
         let inline =
             u64::try_from(self.inline.len()).map_err(|_| Invalid::InvalidStart("input"))?;
@@ -5110,6 +6452,15 @@ impl Try {
                 return Err(Invalid::InvalidTry("checkpoint"));
             }
         }
+        if let Some(continuation) = &self.continuation {
+            continuation
+                .input
+                .validate()
+                .map_err(|_| Invalid::InvalidTry("continuation input"))?;
+            if continuation.manifest_root == [0; 32] {
+                return Err(Invalid::InvalidTry("continuation root"));
+            }
+        }
         Ok(())
     }
 
@@ -5164,6 +6515,7 @@ impl Try {
             limits,
             lease: None,
             checkpoint: None,
+            continuation: None,
         };
         intent.validate_with(run.started.limits)?;
         Ok(intent)
@@ -5466,10 +6818,12 @@ mod tests {
                 offer: demand("offer"),
                 control: demand("control"),
                 accept: demand("accept"),
+                attach: None,
             },
             input: payload("check.input"),
             output: payload("check.output"),
             mode: Mode::Unary,
+            terminal: TerminalSpec::disabled(),
             resume: Resume::Restart,
             effects: Effects::Pure,
             accept: AcceptRule::World,
@@ -5758,6 +7112,8 @@ mod tests {
             world,
             run,
             spec: intent.spec.clone(),
+            mode: declaration.mode,
+            terminal: declaration.terminal,
             world_implementation: [0x44; 32],
             build: intent.build,
             invoker: ActorId::from_incept_hash(&"a".repeat(64)),
@@ -5768,6 +7124,7 @@ mod tests {
             input_digest: intent.input_digest(&declaration).unwrap(),
             input_content: intent.input.content.clone(),
             input_content_bytes: intent.input.content_bytes,
+            max_additional_input_bytes: declaration.input.max_additional_input_bytes,
             resources: intent.resources.clone(),
             limits: intent.limits,
             request,
@@ -6074,6 +7431,7 @@ mod tests {
                 epoch: 4,
             }),
             checkpoint: None,
+            continuation: None,
         }
     }
 
@@ -6100,6 +7458,7 @@ mod tests {
                 limits: intent.limits,
                 lease: intent.lease,
                 checkpoint: intent.checkpoint,
+                continuation: intent.continuation,
             }),
         )
         .unwrap()
@@ -6124,6 +7483,7 @@ mod tests {
                 terminal: TerminalClass::Succeeded,
                 usage: vec![resource("cpu.millis", u64::from(output))],
                 evidence: vec![content(output.saturating_add(1))],
+                transcript: None,
             }),
         )
         .unwrap()
@@ -6446,6 +7806,8 @@ mod tests {
             checkpoint_blobs,
             children,
             output_blobs,
+            transcript_blob: None,
+            transcript: None,
         };
         let events = completion
             .events(
@@ -6653,6 +8015,7 @@ mod tests {
             limits: intent.limits,
             lease: intent.lease,
             checkpoint: intent.checkpoint,
+            continuation: intent.continuation,
         };
         let kinds = [
             RunEventKind::Started(started()),
@@ -6683,6 +8046,7 @@ mod tests {
                 terminal: TerminalClass::Succeeded,
                 usage: vec![resource("cpu.millis", 10)],
                 evidence: vec![content(0x73)],
+                transcript: None,
             }),
             RunEventKind::Failed(Failed {
                 run,
@@ -7051,6 +8415,88 @@ mod tests {
     }
 
     #[test]
+    fn predecessor_run_schema_is_quarantined_without_poisoning_dispatch() {
+        struct PredecessorReader {
+            world: WorldId,
+            run: RunId,
+        }
+
+        impl ReservedBodyReader for PredecessorReader {
+            fn content_descriptor(
+                &self,
+                _content: &replica::content::ContentRef,
+            ) -> Option<replica::content::ContentDescriptor> {
+                None
+            }
+
+            fn binding(&self, key: &BodyKey) -> Option<BodyBinding> {
+                if key == &active_run_body_key(&self.world, self.run) {
+                    return Some(BodyBinding {
+                        schema: SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA).unwrap(),
+                        schema_version: ACTIVE_RUN_BODY_SCHEMA_VERSION,
+                        encoding: replica::body::EncodingId::parse(BODY_ENCODING).unwrap(),
+                        mutation_model: MUTATION_ATOMIC,
+                    });
+                }
+                (key.body.as_bytes() == self.run.as_bytes()).then(|| BodyBinding {
+                    schema: SchemaId::parse(RUN_BODY_SCHEMA).unwrap(),
+                    schema_version: 1,
+                    encoding: replica::body::EncodingId::parse(BODY_ENCODING).unwrap(),
+                    mutation_model: MUTATION_COLLABORATIVE,
+                })
+            }
+
+            fn body_keys_page_with_schema(
+                &self,
+                _world: &WorldId,
+                _schema: &SchemaId,
+                after: Option<&BodyKey>,
+                _limit: usize,
+            ) -> Vec<BodyKey> {
+                after
+                    .is_none()
+                    .then(|| active_run_body_key(&self.world, self.run))
+                    .into_iter()
+                    .collect()
+            }
+
+            fn read_atomic(
+                &self,
+                key: &BodyKey,
+            ) -> Result<Option<crate::world::BodyBytes>, crate::world::BodyReadFailure>
+            {
+                Ok((key == &active_run_body_key(&self.world, self.run))
+                    .then(|| crate::world::BodyBytes::owned(self.run.as_bytes().to_vec())))
+            }
+
+            fn read_collaborative(
+                &self,
+                _key: &BodyKey,
+            ) -> Result<Option<crate::world::CollaborativeBody>, crate::world::BodyReadFailure>
+            {
+                panic!("a predecessor Run must be refused before reading its event encoding")
+            }
+        }
+
+        let world = WorldId::parse("com.example.compatibility").unwrap();
+        let run = run(0x83);
+        let reader = PredecessorReader {
+            world: world.clone(),
+            run,
+        };
+
+        assert_eq!(scan_unresolved(&reader, &world).unwrap(), Vec::new());
+        assert_eq!(
+            read_committed_run(&reader, &world, run),
+            Err(ReadFailure::UnsupportedRunSchema { found: 1 })
+        );
+        assert_eq!(
+            work_state(&reader, &world, run),
+            Err(ReadFailure::UnsupportedRunSchema { found: 1 })
+        );
+    }
+
+    #[test]
     fn run_projection_refuses_ambiguous_or_unbound_attempt_facts() {
         let root = RunEvent::started(started()).unwrap();
         let run = root.run();
@@ -7222,7 +8668,7 @@ mod tests {
         let digest = blake3::hash(&bytes);
         assert_eq!(
             digest.to_hex().as_str(),
-            "6f454ba2fadee4dd6afd22138bd7a20984f24f0a01e2cc361219f9a9d7502b2d"
+            "62eaea6c55fbd52990c85ebac0130d350ca42a584e607ef595b0319c9b3ee9ab"
         );
 
         let mut trailing = bytes.clone();
@@ -7334,6 +8780,35 @@ mod tests {
             candidate.validate(),
             Err(Invalid::InvalidSpec("interactive input"))
         );
+
+        let mut candidate = spec();
+        candidate.mode = Mode::Interactive;
+        candidate.access.attach = Some(demand("attach"));
+        candidate.terminal = TerminalSpec {
+            transcript: Transcript::OnReturn,
+            max_transcript_bytes: 4_096,
+            max_live_input_bytes: 1_024,
+        };
+        candidate.resume = Resume::Never;
+        assert_eq!(candidate.validate(), Ok(()));
+        assert_eq!(
+            Spec::decode_canonical(&candidate.encode().unwrap()),
+            Ok(candidate.clone())
+        );
+
+        candidate.mode = Mode::Unary;
+        assert_eq!(
+            candidate.validate(),
+            Err(Invalid::InvalidSpec("additional input mode"))
+        );
+
+        let mut candidate = spec();
+        candidate.terminal = TerminalSpec {
+            transcript: Transcript::Never,
+            max_transcript_bytes: 1,
+            max_live_input_bytes: 0,
+        };
+        assert_eq!(candidate.validate(), Err(Invalid::InvalidSpec("terminal")));
 
         let mut candidate = spec();
         candidate.resume = Resume::Replay { commands: 65 };
@@ -7595,7 +9070,7 @@ mod tests {
         assert_eq!(Cmd::decode_canonical(&intent_bytes), Ok(intent));
         assert_eq!(
             blake3::hash(&intent_bytes).to_hex().as_str(),
-            "7a5aa8cce596bb0ce2657a5c2ea544026b7e731a08455e4f117376624e6e3666"
+            "23fd0fc22e23358e94776ff5b8e034eaeb63b2d13c809c54fb97c667dcb0b705"
         );
     }
 
@@ -7685,6 +9160,28 @@ mod tests {
         assert_eq!(
             Cmd::decode_canonical(&bytes),
             Err(Invalid::InvalidTry("limits"))
+        );
+
+        let mut continuation = try_intent();
+        continuation.continuation = Some(ContinuationInput {
+            manifest_root: [0x72; 32],
+            input: Input {
+                inline: b"next".to_vec(),
+                content: Vec::new(),
+                content_bytes: 0,
+            },
+        });
+        assert_eq!(continuation.validate(), Ok(()));
+        let command = Cmd::Try(continuation.clone());
+        assert_eq!(
+            Cmd::decode_canonical(&command.encode().unwrap()),
+            Ok(command)
+        );
+
+        continuation.continuation.as_mut().unwrap().manifest_root = [0; 32];
+        assert_eq!(
+            continuation.validate(),
+            Err(Invalid::InvalidTry("continuation root"))
         );
     }
 

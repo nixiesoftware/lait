@@ -1545,7 +1545,9 @@ impl Station {
         self.cancel.cancel();
         // 3) cancel and drain tracked tasks within the deadline.
         let deadline = Instant::now() + self.drain_deadline;
-        let (timed_out, _panicked) = self.drain_tasks(deadline);
+        let exec_timed_out = self.core.drain_exec_attempts(deadline.into());
+        let (task_timed_out, _panicked) = self.drain_tasks(deadline);
+        let timed_out = exec_timed_out || task_timed_out;
         // 4) close the committing core under the writer mutex — an in-flight
         //    submit either completed its journaled durable commit before the
         //    close or observes it and is refused. Every acknowledged commit is

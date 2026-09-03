@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-import { filterCards, listedCards, partCards } from "./book";
-import type { Card } from "./client";
-import { isAgentCard, pictureUri, presenceLabel } from "./kit";
+import { AgentProfilePage, filterCards, listedCards, partCards } from "./book";
+import { fixtureClientView, type Agent, type Card } from "./client";
+import { pictureUri, presenceLabel } from "./kit";
 
 function card(overrides: Partial<Card> & { card: string }): Card {
   return {
@@ -55,14 +57,6 @@ describe("the book's list rules", () => {
     expect(filterCards(rows, "nobody")).toEqual([]);
   });
 
-  it("marks an agent by group or by agents-only handles, never by mixed cards", () => {
-    expect(isAgentCard(card({ card: "a", groups: ["Agents"] }))).toBe(true);
-    expect(isAgentCard(card({ card: "b", agents: ["agent:h:name"] }))).toBe(true);
-    // A person's card may list co-located agents; an address anchors it.
-    expect(isAgentCard(card({ card: "c", agents: ["agent:h:name"], addresses: ["actor:s:c"] }))).toBe(false);
-    expect(isAgentCard(card({ card: "d" }))).toBe(false);
-  });
-
   it("words a measured presence and says nothing for an absence", () => {
     expect(presenceLabel("online")).toBe("Online");
     expect(presenceLabel("offline")).toBe("Offline");
@@ -73,5 +67,47 @@ describe("the book's list rules", () => {
     expect(pictureUri("image/png;base64,QUJD")).toBe("data:image/png;base64,QUJD");
     expect(pictureUri("not-a-picture")).toBeNull();
     expect(pictureUri(null)).toBeNull();
+  });
+
+  it("offers agent management only from explicit canManage authority", () => {
+    const agent: Agent = {
+      profile: "prf_adam", owner: "prf_owner", name: "Adam",
+      introduction: "Adam is a virtual assistant.", lifecycle: "active",
+      canManage: false, recordRevision: 2, inventoryRevision: 4,
+      inventoryVisibility: "public", primitives: [],
+    };
+    const draw = (current: Agent) => renderToStaticMarkup(createElement(AgentProfilePage, {
+      agent: current,
+      view: { ...fixtureClientView, agent: current },
+      dispatch: async () => undefined,
+      onBack: () => undefined,
+    }));
+    expect(draw(agent)).not.toContain("Manage Adam");
+    expect(draw(agent)).not.toContain("Inventory visibility");
+    expect(draw({ ...agent, canManage: true })).toContain("Manage Adam");
+    expect(draw({ ...agent, canManage: true })).toContain("Inventory visibility");
+  });
+
+  it("does not present authored primitive standing as live provider health", () => {
+    const agent: Agent = {
+      profile: "prf_adam", owner: "prf_owner", name: "Adam",
+      introduction: "Adam is a virtual assistant.", lifecycle: "active",
+      canManage: true, recordRevision: 2, inventoryRevision: 4,
+      inventoryVisibility: "public",
+      primitives: [{
+        id: "console", primitive: "lait.console", label: "Console",
+        summary: "Owner-authorized work.", standing: "ready",
+        operationalStanding: "unavailable", visibility: "public", editable: false,
+      }],
+    };
+    const markup = renderToStaticMarkup(createElement(AgentProfilePage, {
+      agent,
+      view: { ...fixtureClientView, agent },
+      dispatch: async () => undefined,
+      onBack: () => undefined,
+    }));
+    expect(markup).toContain("live: unavailable");
+    expect(markup).toContain("Configured: ready");
+    expect(markup).not.toContain("live: ready");
   });
 });

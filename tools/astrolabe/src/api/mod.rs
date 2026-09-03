@@ -85,6 +85,10 @@ pub struct ClientView {
     /// This identity's correspondence — the mailbox and the arrival standing.
     /// `None` until read once, distinct from a mailbox that answered empty.
     pub correspondence: Option<CorrespondenceFacts>,
+    /// Global agents this identity owns, and the inventory profile currently
+    /// open. Management authority is carried explicitly on `agent`.
+    pub agents: Option<Vec<AgentSummaryRow>>,
+    pub agent: Option<AgentRow>,
     /// This identity's profile: the devices that hold it, the code this one
     /// is showing if it is waiting to be added, and any device waiting on
     /// this person to confirm it. `None` until read once — which is not a
@@ -1078,6 +1082,41 @@ pub struct ChatMessageRow {
     pub provenance_agrees: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentSummaryRow {
+    pub profile: String,
+    pub owner: String,
+    pub name: String,
+    pub introduction: String,
+    pub lifecycle: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentRow {
+    pub profile: String,
+    pub owner: String,
+    pub name: String,
+    pub introduction: String,
+    pub lifecycle: String,
+    pub can_manage: bool,
+    pub record_revision: u64,
+    pub inventory_revision: u64,
+    pub inventory_visibility: String,
+    pub primitives: Vec<AgentPrimitiveRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentPrimitiveRow {
+    pub id: String,
+    pub primitive: String,
+    pub label: String,
+    pub summary: String,
+    pub standing: Option<String>,
+    pub operational_standing: Option<String>,
+    pub visibility: Option<String>,
+    pub editable: bool,
+}
+
 /// One staged suggestion from a card-exchange file. Review is the only way
 /// into the book, so this carries exactly what the person must judge.
 #[derive(Debug, Clone, PartialEq)]
@@ -1233,6 +1272,25 @@ pub enum ActionRequest {
     StartHead,
     StopHead {
         id: String,
+    },
+    CreateAgent {
+        name: String,
+        introduction: String,
+    },
+    ReadAgent {
+        agent: String,
+    },
+    SetAgentLifecycle {
+        agent: String,
+        record_revision: u64,
+        inventory_revision: u64,
+        lifecycle: String,
+    },
+    SetAgentVisibility {
+        agent: String,
+        record_revision: u64,
+        inventory_revision: u64,
+        visibility: String,
     },
     /// Send a message to a person, over the configured carrier.
     SendMessage {
@@ -1498,6 +1556,44 @@ impl ActionRequest {
             Self::ReadSpace { orbit } => Action::ReadSpace(space_ref(orbit)),
             Self::StartHead => Action::StartHead,
             Self::StopHead { id } => Action::StopHead(id),
+            Self::CreateAgent { name, introduction } => Action::CreateAgent { name, introduction },
+            Self::ReadAgent { agent } => Action::ReadAgent(agent),
+            Self::SetAgentLifecycle {
+                agent,
+                record_revision,
+                inventory_revision,
+                lifecycle,
+            } => Action::SetAgentLifecycle {
+                agent,
+                expected: lait::control::AgentStateRevision {
+                    record: record_revision,
+                    inventory: inventory_revision,
+                },
+                lifecycle: match lifecycle.as_str() {
+                    "active" => lait::control::AgentLifecycleSetting::Active,
+                    "suspended" => lait::control::AgentLifecycleSetting::Suspended,
+                    "retired" => lait::control::AgentLifecycleSetting::Retired,
+                    _ => return Err("agent lifecycle must be active, suspended, or retired".into()),
+                },
+            },
+            Self::SetAgentVisibility {
+                agent,
+                record_revision,
+                inventory_revision,
+                visibility,
+            } => Action::SetAgentVisibility {
+                agent,
+                expected: lait::control::AgentStateRevision {
+                    record: record_revision,
+                    inventory: inventory_revision,
+                },
+                visibility: match visibility.as_str() {
+                    "public" => lait::control::AgentInventoryVisibility::Public,
+                    "contacts" => lait::control::AgentInventoryVisibility::Contacts,
+                    "private" => lait::control::AgentInventoryVisibility::Private,
+                    _ => return Err("agent visibility must be public, contacts, or private".into()),
+                },
+            },
             Self::SendMessage { to, body } => Action::SendMessage { to, body },
             Self::ShareReach => Action::ShareReach,
             Self::AddCorrespondent { announcement } => Action::AddCorrespondent { announcement },
@@ -2169,6 +2265,8 @@ fn empty() -> ClientView {
         space: None,
         book: None,
         correspondence: None,
+        agents: None,
+        agent: None,
         profile: None,
         notices: Vec::new(),
         failures: Vec::new(),
@@ -2645,6 +2743,19 @@ fn project(app: &App) -> ClientView {
             open_tabs: corr.open_tabs.clone(),
             active_tab: corr.active_tab.clone(),
         }),
+        agents: app.agents().map(|agents| {
+            agents
+                .iter()
+                .map(|agent| AgentSummaryRow {
+                    profile: agent.profile.clone(),
+                    owner: agent.owner.clone(),
+                    name: agent.name.clone(),
+                    introduction: agent.introduction.clone(),
+                    lifecycle: lifecycle_name(agent.lifecycle).to_owned(),
+                })
+                .collect()
+        }),
+        agent: app.agent().map(agent_row),
         // Joined here from two reads of the one identity: the device set is
         // the reach view's and the waiting code and offers are orientation's.
         // Joining at the boundary rather than in the model keeps each read
@@ -2881,6 +2992,114 @@ fn project(app: &App) -> ClientView {
     }
 }
 
+fn lifecycle_name(value: lait::control::AgentLifecycleSetting) -> &'static str {
+    match value {
+        lait::control::AgentLifecycleSetting::Active => "active",
+        lait::control::AgentLifecycleSetting::Suspended => "suspended",
+        lait::control::AgentLifecycleSetting::Retired => "retired",
+    }
+}
+
+fn inventory_visibility_name(value: lait::control::AgentInventoryVisibility) -> &'static str {
+    match value {
+        lait::control::AgentInventoryVisibility::Public => "public",
+        lait::control::AgentInventoryVisibility::Contacts => "contacts",
+        lait::control::AgentInventoryVisibility::Private => "private",
+    }
+}
+
+fn item_visibility_name(value: lait::control::AgentItemVisibility) -> &'static str {
+    match value {
+        lait::control::AgentItemVisibility::Inherit => "inherit",
+        lait::control::AgentItemVisibility::Contacts => "contacts",
+        lait::control::AgentItemVisibility::Private => "private",
+    }
+}
+
+fn primitive_standing_name(value: lait::control::AgentPrimitiveStanding) -> &'static str {
+    match value {
+        lait::control::AgentPrimitiveStanding::Ready => "ready",
+        lait::control::AgentPrimitiveStanding::Unavailable => "unavailable",
+        lait::control::AgentPrimitiveStanding::Suspended => "suspended",
+        lait::control::AgentPrimitiveStanding::Revoked => "revoked",
+    }
+}
+
+fn agent_row(agent: &lait::control::AgentView) -> AgentRow {
+    let (inventory_visibility, primitives) = match &agent.inventory {
+        lait::control::AgentInventoryView::Hidden => ("hidden".to_owned(), Vec::new()),
+        lait::control::AgentInventoryView::Public {
+            audience, items, ..
+        } => (
+            match audience {
+                lait::control::AgentInventoryAudience::Public => "public",
+                lait::control::AgentInventoryAudience::Contacts => "contacts",
+                lait::control::AgentInventoryAudience::Owner => "owner",
+            }
+            .to_owned(),
+            items
+                .iter()
+                .map(|item| AgentPrimitiveRow {
+                    id: item.id.clone(),
+                    primitive: item.primitive.clone(),
+                    label: item.label.clone(),
+                    summary: item.summary.clone(),
+                    standing: item
+                        .standing
+                        .map(primitive_standing_name)
+                        .map(str::to_owned),
+                    operational_standing: item
+                        .operational_standing
+                        .map(primitive_standing_name)
+                        .map(str::to_owned),
+                    visibility: None,
+                    editable: false,
+                })
+                .collect(),
+        ),
+        lait::control::AgentInventoryView::Owner {
+            default_visibility,
+            items,
+            ..
+        } => (
+            inventory_visibility_name(*default_visibility).to_owned(),
+            items
+                .iter()
+                .map(|item| AgentPrimitiveRow {
+                    id: item.public.id.clone(),
+                    primitive: item.public.primitive.clone(),
+                    label: item.public.label.clone(),
+                    summary: item.public.summary.clone(),
+                    standing: item
+                        .public
+                        .standing
+                        .map(primitive_standing_name)
+                        .map(str::to_owned),
+                    operational_standing: item
+                        .public
+                        .operational_standing
+                        .map(primitive_standing_name)
+                        .map(str::to_owned),
+                    visibility: Some(item_visibility_name(item.visibility).to_owned()),
+                    editable: item.editable,
+                })
+                .collect(),
+        ),
+    };
+    AgentRow {
+        profile: agent.profile.clone(),
+        owner: agent.owner.clone(),
+        name: agent.name.clone(),
+        introduction: agent.introduction.clone(),
+        lifecycle: lifecycle_name(agent.lifecycle).to_owned(),
+        can_manage: agent.can_manage,
+        record_revision: agent.revision.record,
+        inventory_revision: agent.revision.inventory,
+        inventory_visibility,
+        primitives,
+    }
+}
+
 /// Measured presence for one card, joined over its handles.
 ///
 /// A person online on one device is online, so the best observation wins.
@@ -3022,6 +3241,38 @@ mod tests {
     use super::*;
     use crate::client::library::LibraryEntry;
     use crate::runtime::{Action, Update};
+
+    #[test]
+    fn agent_actions_keep_profile_selectors_and_expected_revisions_whole() {
+        let created = ActionRequest::CreateAgent {
+            name: "Adam".into(),
+            introduction: "Adam is a virtual assistant.".into(),
+        }
+        .into_action()
+        .expect("create action");
+        assert!(matches!(
+            created,
+            Action::CreateAgent { ref name, ref introduction }
+                if name == "Adam" && introduction.contains("virtual assistant")
+        ));
+
+        let changed = ActionRequest::SetAgentVisibility {
+            agent: "prf_adam".into(),
+            record_revision: 7,
+            inventory_revision: 11,
+            visibility: "contacts".into(),
+        }
+        .into_action()
+        .expect("visibility action");
+        assert!(matches!(
+            changed,
+            Action::SetAgentVisibility {
+                ref agent,
+                expected: lait::control::AgentStateRevision { record: 7, inventory: 11 },
+                visibility: lait::control::AgentInventoryVisibility::Contacts,
+            } if agent == "prf_adam"
+        ));
+    }
 
     /// The client's own update decision crosses as a decision, and it is made
     /// here — against the same `in_flight` the view reports, which is the

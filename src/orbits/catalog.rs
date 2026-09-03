@@ -131,6 +131,18 @@ impl Catalog {
         &self.identity
     }
 
+    /// The canonical configuration seam under which this daemon may discover
+    /// co-located agent identity homes.
+    pub(crate) fn agents_base(&self) -> &Path {
+        &self.agents_base
+    }
+
+    /// Whether this catalog belongs to a self-contained identity. Such a daemon
+    /// may observe only itself and must never load a sibling agent's key.
+    pub(crate) fn self_contained(&self) -> bool {
+        self.self_contained
+    }
+
     /// Return the Orbits visible to this daemon identity, preserving registry
     /// order. Human observability includes named agents; self-contained
     /// identities see only their own home. No control channel is opened and no

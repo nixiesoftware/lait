@@ -18,7 +18,6 @@ import {
 } from "react-aria-components";
 import type { ReactNode } from "react";
 
-import type { Card as BookCard } from "./client";
 import { IconMore, IconUser } from "./icons";
 
 export type Presence = "online" | "away" | "offline" | null;
@@ -34,22 +33,6 @@ export function presenceLabel(presence: Presence): string | null {
     case "offline": return "Offline";
     case null: return null;
   }
-}
-
-/**
- * The canonical group the daemon files an agent's card under — part of the
- * book's wire vocabulary, not a display string.
- */
-const agentGroup = "Agents";
-
-/**
- * An agent's own card: filed under the agent group, or carrying nothing but
- * `agent:` spellings. Worn as the AI mark on a row — never as a section: what
- * an identity is and whether it is here are different axes.
- */
-export function isAgentCard(card: Pick<BookCard, "groups" | "agents" | "addresses" | "devices">): boolean {
-  return card.groups.includes(agentGroup)
-    || (card.agents.length > 0 && card.addresses.length === 0 && card.devices.length === 0);
 }
 
 /** The stored `<mime>;base64,<data>` form, resolved to a drawable URI. */

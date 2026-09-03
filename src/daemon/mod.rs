@@ -8,7 +8,10 @@
 //! per-home IPC remains only as an internal compatibility adapter.
 
 pub(crate) mod address_book;
+pub(crate) mod agent_console;
+pub(crate) mod agents;
 pub(crate) mod correspondence;
+pub(crate) mod correspondence_host;
 pub(crate) mod fanout;
 pub(crate) mod host;
 pub(crate) mod markers;

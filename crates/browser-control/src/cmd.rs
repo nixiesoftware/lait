@@ -31,7 +31,12 @@ pub enum Disposition {
 /// Every control command's placement. One entry per wire `cmd` tag.
 pub const CLASSIFIED: &[(&str, Disposition)] = &[
     ("agent_add", Disposition::DaemonOnly),
-    ("agent_provision", Disposition::DaemonOnly),
+    ("agent_create", Disposition::DaemonOnly),
+    ("agent_inventory_mutate", Disposition::DaemonOnly),
+    ("agent_list", Disposition::DaemonOnly),
+    ("agent_set_lifecycle", Disposition::DaemonOnly),
+    ("agent_show", Disposition::DaemonOnly),
+    ("agent_sponsor", Disposition::DaemonOnly),
     ("assignment_grant", Disposition::DaemonOnly),
     ("assignment_list", Disposition::NotYet),
     ("assignment_revoke", Disposition::DaemonOnly),

@@ -228,6 +228,9 @@ pub struct StationHost {
     identity: LocalIdentity,
     device_seed: [u8; 32],
     home: PathBuf,
+    /// Present only for an in-process placement launched by an owner's Router.
+    /// Attached and standalone compatibility hosts cannot open global agents.
+    agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
     /// Signalled by a `Stop` request so `serve` returns (the injectable
     /// contract: return, don't `exit`).
     shutdown: Arc<tokio::sync::Notify>,
@@ -510,7 +513,7 @@ impl StationRunner {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
     ) -> Result<Self> {
-        Self::start_inner(home, device_seed, factory, packages, None).await
+        Self::start_inner(home, device_seed, factory, packages, None, None).await
     }
 
     /// Start through the host-owned bounded blocking lane. Only the
@@ -522,8 +525,17 @@ impl StationRunner {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
         blocking: Arc<tokio::sync::Semaphore>,
+        agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
     ) -> Result<Self> {
-        Self::start_inner(home, device_seed, factory, packages, Some(blocking)).await
+        Self::start_inner(
+            home,
+            device_seed,
+            factory,
+            packages,
+            Some(blocking),
+            agent_seeds,
+        )
+        .await
     }
 
     async fn start_inner(
@@ -532,6 +544,7 @@ impl StationRunner {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
         blocking: Option<Arc<tokio::sync::Semaphore>>,
+        agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
     ) -> Result<Self> {
         // Lock-file open/replace is fixed-size, but still performs filesystem
         // I/O. The admitted launcher path must not do even that work on a
@@ -542,7 +555,8 @@ impl StationRunner {
         })
         .await?;
         let host = Arc::new(
-            StationHost::open_inner(&home, device_seed, factory, packages, blocking).await?,
+            StationHost::open_inner(&home, device_seed, factory, packages, blocking, agent_seeds)
+                .await?,
         );
         Ok(Self {
             home,
@@ -616,6 +630,19 @@ impl StationHost {
         self.station.live().media_with_sessions()
     }
 
+    /// Make a verified owner-held global agent known to this Space without
+    /// granting it standing. The inception is signed by the agent's own seed;
+    /// the caller must separately author the owner's sponsorship ACL action.
+    pub(crate) fn incept_global_agent(&self, profile: &str) -> Result<mechanics::ids::ActorId> {
+        let seed = self
+            .agent_seeds
+            .as_ref()
+            .ok_or_else(|| anyhow!("this Station has no owner-scoped agent custody"))?
+            .resolve(profile)
+            .map_err(|error| anyhow!(error.to_string()))?;
+        self.mechanics.incept_agent(&seed)
+    }
+
     /// Open and activate the orbital stack for a home, then dock the routing
     /// Session. Refuses a pre-orbital home.
     pub async fn open(
@@ -624,7 +651,7 @@ impl StationHost {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
     ) -> Result<Self> {
-        Self::open_inner(home, device_seed, factory, packages, None).await
+        Self::open_inner(home, device_seed, factory, packages, None, None).await
     }
 
     async fn open_inner(
@@ -633,6 +660,7 @@ impl StationHost {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
         blocking: Option<Arc<tokio::sync::Semaphore>>,
+        agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
     ) -> Result<Self> {
         let home_for_open = home.to_path_buf();
         let prepare = move || prepare_station_open(&home_for_open, device_seed, packages);
@@ -821,6 +849,7 @@ impl StationHost {
             identity,
             device_seed,
             home: home.to_path_buf(),
+            agent_seeds,
             shutdown: Arc::new(tokio::sync::Notify::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             stop_tx: tokio::sync::watch::channel(false).0,
@@ -1390,18 +1419,22 @@ impl StationHost {
     }
 
     /// Resolve the acting identity's seed. `None` → the daemon's primary (human)
-    /// identity. `Some(name)` → a local agent identity provisioned under this
-    /// home; a missing one is a typed denial the agent surface can act on.
+    /// identity. A ProfileId selects a verified global agent held by its owner;
+    /// a legacy name can only open an already-held Space-local signer. A Space
+    /// never creates an agent identity.
     fn acting_seed(&self, act_as: Option<&str>) -> Result<[u8; 32], Response> {
         match act_as {
             None => Ok(self.device_seed),
-            Some(name) => load_agent_seed(&self.home, name).map_err(|e| {
-                Response::denied(format!(
-                    "no local agent identity '{name}' on this node — provision one with \
-                     sponsoring `{name}` from the members view (it self-incepts + is sponsored in \
-                     one step), then act as it: {e}"
-                ))
-            }),
+            Some(selector) => {
+                let seed = load_agent_seed(&self.home, self.agent_seeds.as_ref(), selector)
+                    .map_err(|e| {
+                        Response::denied(format!(
+                        "no authorized agent identity '{selector}' on this node: {e}; create and \
+                         manage agent identities through the daemon agent inventory"
+                    ))
+                    })?;
+                Ok(seed)
+            }
         }
     }
 
@@ -1687,7 +1720,9 @@ impl StationHost {
                 },
                 Err(e) => Response::err(format!("{e}")),
             },
-            Request::AgentProvision { name } => self.agent_provision(&name),
+            Request::AgentSponsor { .. } => Response::err(
+                "agent_sponsor must pass through the identity daemon so the global profile can be verified",
+            ),
             Request::WorldActivate { world } => {
                 let Some(world_id) = WorldId::parse(&world) else {
                     return Response::err("invalid World id");
@@ -2132,6 +2167,11 @@ impl StationHost {
                     "this exact publication's Runtime Body is temporarily unavailable — sync or retry shortly",
                 ),
             },
+            Err(runtime::exec::WorkRefusal::UnsupportedRunSchema { found }) => Response::err(
+                format!(
+                    "this Runtime Run uses unsupported durable schema generation {found}; it is quarantined from execution and requires the matching historical implementation"
+                ),
+            ),
             Err(runtime::exec::WorkRefusal::Unsupported(message)) => Response::invalid(message),
             Err(runtime::exec::WorkRefusal::Session(
                 runtime::world::Failure::Rejected(runtime::world::Rejection::Denied(_)),
@@ -2279,54 +2319,6 @@ impl StationHost {
             sponsorship_granted: false,
             wait_heads: Vec::new(),
         })
-    }
-
-    /// Provision a co-located agent identity by name (the seamless "sponsor
-    /// once" flow): mint/reuse its seed under this home, self-incept it into the
-    /// shared store, and sponsor it with content authority — all local, one
-    /// step. Afterwards a client acts as it via `--as <name>` / MCP.
-    fn agent_provision(&self, name: &str) -> Response {
-        // The name becomes a directory under the home; keep it a plain segment.
-        // Said here so the refusal names the verb, and enforced again wherever
-        // the name is joined into a path.
-        if !is_plain_agent_name(name) {
-            return Response::err(AGENT_NAME_RULE);
-        }
-        // Only a human member may sponsor; surface it before minting a seed.
-        if !self.mechanics.am_i_member() {
-            return Response::denied(
-                "you are not yet a member of this space, so you cannot sponsor an agent — \
-                 complete your own admission first",
-            );
-        }
-        let seed = match load_or_create_agent_seed(&self.home, name) {
-            Ok(s) => s,
-            Err(e) => return Response::err(format!("provision agent '{name}': {e:#}")),
-        };
-        let assignments = match self.contributor_assignments() {
-            Ok(assignments) => assignments,
-            Err(error) => return Response::err(format!("expand contributor role: {error}")),
-        };
-        match self.mechanics.provision_agent(&seed, &assignments) {
-            Ok(actor) => {
-                let device = mechanics::actor::device_from_seed(&seed);
-                let did = mechanics::actor::did_key_from_device(&device).unwrap_or_default();
-                // The NAME lands in the identity's address book, not here: the
-                // daemon funnel reads the `actor …` line below and authors a
-                // Card for the agent, because a Station has no reach into the
-                // identity-scoped book. The line's shape is therefore part of
-                // this reply's contract.
-                Response::Ok {
-                    message: Some(format!(
-                        "provisioned + sponsored agent '{name}'\nactor {}\n{did}\n\
-                         it holds write access; act as it with `--as {name}` (or point an \
-                         MCP client at this home with LAIT_AGENT={name})",
-                        actor.as_str()
-                    )),
-                }
-            }
-            Err(e) => Response::err(format!("sponsor agent '{name}': {e:#}")),
-        }
     }
 
     fn contributor_assignments(
@@ -4711,50 +4703,22 @@ fn is_plain_agent_name(name: &str) -> bool {
 const AGENT_NAME_RULE: &str =
     "an agent name must be a plain identifier (no path separators or '..')";
 
-/// Create (first call) or load a co-located agent identity seed under `home`.
-/// The seed is the agent's identity — self-certifying, reconstructable, and
-/// persisted outside any working-directory sandbox (§10 finding 1).
-fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
-    let path = agent_seed_path(home, name)?;
-    // Owner-only, through the module that exists because `std::fs` cannot set a
-    // DACL. This seed *is* the agent: it signs as it, and a credential derived
-    // from it is how the agent reaches this device over HTTP. Written with
-    // `std::fs::write` it landed 0644 under a typical umask, so any other local
-    // account could read it — and loopback has no peer credential we check, a
-    // point `serve::auth`'s own module doc makes.
-    //
-    // Portable rather than device-bound, deliberately: the bytes stay the hex
-    // string every already-provisioned agent has on disk, so hardening does not
-    // become a migration. What changes is who may open the file.
-    if let Some(parent) = path.parent() {
-        mechanics::secretfs::create_private_dir(parent)
-            .with_context(|| format!("make agent '{name}' private"))?;
-    }
-    if path.exists() {
-        // An agent provisioned before this was private stays readable until
-        // something re-writes it, so re-harden in place on the way past. A
-        // failure here is not fatal — refusing to load an agent because its
-        // permissions could not be tightened would take the identity away over
-        // a lesser problem — but it is worth saying out loud.
-        if let Err(error) = mechanics::secretfs::harden_in_place(&path) {
-            tracing::warn!(%name, %error, "could not tighten an agent seed's permissions");
-        }
-        load_agent_seed(home, name)
-    } else {
-        let seed = mechanics::actor::random_seed().context("generate agent seed")?;
-        mechanics::secretfs::write_private(
-            &path,
-            data_encoding::HEXLOWER.encode(&seed).as_bytes(),
-            mechanics::secretfs::Create::New,
-            mechanics::secretfs::Wrap::Portable,
-        )
-        .with_context(|| format!("write agent '{name}' seed"))?;
-        Ok(seed)
-    }
-}
-
 /// Load an existing co-located agent identity seed; errors if none is provisioned.
-fn load_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
+fn load_agent_seed(
+    home: &Path,
+    agent_seeds: Option<&crate::daemon::agents::AgentSeedResolver>,
+    name: &str,
+) -> Result<[u8; 32]> {
+    // Current agents are selected by stable global ProfileId and verified
+    // against their owner bond before this trusted local process receives the
+    // seed. Nothing is copied into the Space home. A non-profile selector may
+    // still open a pre-registry legacy signer for read compatibility only.
+    if mechanics::kinship::ProfileId::parse(name).is_some() {
+        return agent_seeds
+            .ok_or_else(|| anyhow!("this Station has no owner-scoped agent custody"))?
+            .resolve(name)
+            .map_err(|error| anyhow!(error.to_string()));
+    }
     let path = agent_seed_path(home, name)?;
     let hex = std::fs::read_to_string(&path)
         .with_context(|| format!("no agent identity '{name}' provisioned"))?;

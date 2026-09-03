@@ -153,12 +153,12 @@ export function Members({
                     void act(SPONSOR, async () => {
                       const name = await ask.prompt({
                         title: "Sponsor an agent",
-                        body: "An agent is a member with its own key. Sponsoring one mints that key on this machine and gives it write access, so its work is signed as itself and never as you. Its standing ends when yours does. This is the local name its identity is kept under, and the one an MCP client passes as LAIT_AGENT.",
-                        label: "Name",
-                        defaultValue: "claude",
+                        body: "Choose an agent you already own in your Lait inventory. Sponsoring gives that existing identity write access here; it does not create or copy the agent's key into this Space.",
+                        label: "Agent profile",
+                        defaultValue: "prf_",
                       });
                       if (!name?.trim()) return;
-                      await rpc(spaceId, { cmd: "agent_provision", name: name.trim() });
+                      await rpc(spaceId, { cmd: "agent_sponsor", agent: name.trim() });
                     })
                   }
                   icon={<Bot className="size-icon-sm" />}

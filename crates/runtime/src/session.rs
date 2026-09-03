@@ -76,6 +76,9 @@ pub enum Failure {
     Busy,
     Reset,
     CallbackPanicked,
+    /// A locally enforced runtime resource ceiling was crossed. Distinct from
+    /// a World rejection and from a handler defect.
+    ResourceLimit,
     /// The requested World generation is well-formed but this Station does not
     /// retain its material. Distinct from reset/interruption: callers may fall
     /// back to a nearer ancestor or request the generation from another holder.
@@ -2279,8 +2282,12 @@ impl Default for ExecPacing {
 }
 
 struct ExecGate {
-    inflight: std::collections::BTreeSet<crate::exec::AttemptId>,
+    /// Every locally-begun Attempt, with the control handle and performer
+    /// ownership for this activation. The durable Attempt remains truth; this
+    /// map is only the live delivery and completion handoff.
+    inflight: std::collections::BTreeMap<crate::exec::AttemptId, ActiveAttempt>,
     busy: bool,
+    stopping: bool,
     /// The last Run this Station's drain served, per World: the next pass
     /// starts after it, so one busy Run cannot monopolize the sorted scan.
     cursor: std::collections::BTreeMap<WorldId, crate::exec::RunId>,
@@ -2295,6 +2302,39 @@ struct ExecGate {
     /// A deadline is measured from here; a fresh renewal resets it. Activation
     /// memory: a restart forgets, which only ever delays a presumption.
     liveness_observed: std::collections::BTreeMap<crate::exec::AttemptId, (u64, usize)>,
+}
+
+struct ActiveAttempt {
+    run: crate::exec::RunId,
+    control: crate::exec::AttemptControl,
+    terminal: Option<Arc<crate::exec::TerminalSession>>,
+    worker: AttemptWorker,
+}
+
+enum AttemptWorker {
+    /// Began is durable and the next drain pass may launch the performer.
+    Registered,
+    /// Invocation owns this thread. Completion crosses only through the
+    /// channel; the drain never calls a handler inline.
+    Running {
+        completion: std::sync::mpsc::Receiver<WorkerCompletion>,
+        handle: std::thread::JoinHandle<()>,
+    },
+    /// The worker finished between drain passes. Kept here until the durable
+    /// completion commit succeeds or the Attempt is honestly recovered.
+    Ready {
+        completion: WorkerCompletion,
+        handle: std::thread::JoinHandle<()>,
+    },
+}
+
+type WorkerCompletion = Result<crate::exec::Completion, crate::exec::DispatchFailure>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptWorkerState {
+    Registered,
+    Running,
+    Ready,
 }
 
 impl StationCore {
@@ -2376,8 +2416,9 @@ impl StationCore {
             broadcaster: Arc::new(Broadcaster::new(epoch, observation_capacity, frontier)),
             authority_tick: tokio::sync::watch::Sender::new(0),
             exec: std::sync::Mutex::new(ExecGate {
-                inflight: std::collections::BTreeSet::new(),
+                inflight: std::collections::BTreeMap::new(),
                 busy: false,
+                stopping: false,
                 cursor: std::collections::BTreeMap::new(),
                 resolved_seen: std::collections::BTreeMap::new(),
                 pacing: ExecPacing::default(),
@@ -2459,7 +2500,7 @@ impl StationCore {
 
     fn try_begin_perform(&self) -> bool {
         let mut gate = self.exec.lock_recovering();
-        if gate.busy {
+        if gate.busy || gate.stopping {
             return false;
         }
         gate.busy = true;
@@ -2470,16 +2511,181 @@ impl StationCore {
         self.exec.lock_recovering().busy = false;
     }
 
-    fn claim_attempt(&self, attempt: crate::exec::AttemptId) {
-        self.exec.lock_recovering().inflight.insert(attempt);
+    fn claim_attempt(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+        terminal: Option<Arc<crate::exec::TerminalSession>>,
+    ) -> bool {
+        let mut gate = self.exec.lock_recovering();
+        if gate.stopping {
+            return false;
+        }
+        gate.inflight.insert(
+            attempt,
+            ActiveAttempt {
+                run,
+                control: crate::exec::AttemptControl::new(),
+                terminal,
+                worker: AttemptWorker::Registered,
+            },
+        );
+        true
     }
 
     fn release_attempt(&self, attempt: crate::exec::AttemptId) {
         self.exec.lock_recovering().inflight.remove(&attempt);
     }
 
-    fn is_inflight(&self, attempt: crate::exec::AttemptId) -> bool {
-        self.exec.lock_recovering().inflight.contains(&attempt)
+    fn attempt_control(
+        &self,
+        attempt: crate::exec::AttemptId,
+    ) -> Option<crate::exec::AttemptControl> {
+        self.exec
+            .lock_recovering()
+            .inflight
+            .get(&attempt)
+            .map(|active| active.control.clone())
+    }
+
+    fn terminal_session(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+    ) -> Result<Arc<crate::exec::TerminalSession>, crate::exec::TerminalFailure> {
+        let gate = self.exec.lock_recovering();
+        let active = gate
+            .inflight
+            .get(&attempt)
+            .ok_or(crate::exec::TerminalFailure::Unavailable)?;
+        if active.run != run {
+            return Err(crate::exec::TerminalFailure::MismatchedAttempt);
+        }
+        active
+            .terminal
+            .clone()
+            .ok_or(crate::exec::TerminalFailure::Unsupported)
+    }
+
+    fn cancel_run(&self, run: crate::exec::RunId) {
+        let gate = self.exec.lock_recovering();
+        for active in gate.inflight.values().filter(|active| active.run == run) {
+            active.control.cancel();
+        }
+    }
+
+    fn install_attempt_worker(
+        &self,
+        attempt: crate::exec::AttemptId,
+        completion: std::sync::mpsc::Receiver<WorkerCompletion>,
+        handle: std::thread::JoinHandle<()>,
+    ) -> Result<
+        (),
+        (
+            std::sync::mpsc::Receiver<WorkerCompletion>,
+            std::thread::JoinHandle<()>,
+        ),
+    > {
+        let mut gate = self.exec.lock_recovering();
+        let Some(active) = gate.inflight.get_mut(&attempt) else {
+            return Err((completion, handle));
+        };
+        if !matches!(active.worker, AttemptWorker::Registered) {
+            return Err((completion, handle));
+        }
+        active.worker = AttemptWorker::Running { completion, handle };
+        Ok(())
+    }
+
+    fn attempt_worker_state(&self, attempt: crate::exec::AttemptId) -> Option<AttemptWorkerState> {
+        let mut gate = self.exec.lock_recovering();
+        let active = gate.inflight.get_mut(&attempt)?;
+        let ready = match &mut active.worker {
+            AttemptWorker::Registered => return Some(AttemptWorkerState::Registered),
+            AttemptWorker::Ready { .. } => return Some(AttemptWorkerState::Ready),
+            AttemptWorker::Running {
+                completion,
+                handle: _,
+            } => match completion.try_recv() {
+                Ok(completion) => Some(completion),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(
+                    crate::exec::DispatchFailure::Backend(crate::exec::Failure::Handler),
+                )),
+            },
+        };
+        if let Some(completion) = ready {
+            let previous = std::mem::replace(&mut active.worker, AttemptWorker::Registered);
+            let AttemptWorker::Running { handle, .. } = previous else {
+                return Some(AttemptWorkerState::Registered);
+            };
+            active.worker = AttemptWorker::Ready { completion, handle };
+            Some(AttemptWorkerState::Ready)
+        } else {
+            Some(AttemptWorkerState::Running)
+        }
+    }
+
+    fn take_attempt_completion(&self, attempt: crate::exec::AttemptId) -> Option<WorkerCompletion> {
+        let mut gate = self.exec.lock_recovering();
+        let active = gate.inflight.get_mut(&attempt)?;
+        let previous = std::mem::replace(&mut active.worker, AttemptWorker::Registered);
+        let AttemptWorker::Ready { completion, handle } = previous else {
+            active.worker = previous;
+            return None;
+        };
+        let panicked = handle.join().is_err();
+        if panicked {
+            Some(Err(crate::exec::DispatchFailure::Backend(
+                crate::exec::Failure::Handler,
+            )))
+        } else {
+            Some(completion)
+        }
+    }
+
+    /// Cancel, then reap every performer owned by this activation within the
+    /// same shutdown budget as the rest of the Station's task graph.
+    pub(crate) fn drain_exec_attempts(&self, deadline: std::time::Instant) -> bool {
+        let mut attempts = {
+            let mut gate = self.exec.lock_recovering();
+            gate.stopping = true;
+            for active in gate.inflight.values() {
+                active.control.cancel();
+            }
+            std::mem::take(&mut gate.inflight)
+        };
+        loop {
+            let all_finished = attempts.values().all(|active| match &active.worker {
+                AttemptWorker::Registered => true,
+                AttemptWorker::Running { handle, .. } | AttemptWorker::Ready { handle, .. } => {
+                    handle.is_finished()
+                }
+            });
+            if all_finished || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut timed_out = false;
+        for active in attempts.values_mut() {
+            let previous = std::mem::replace(&mut active.worker, AttemptWorker::Registered);
+            match previous {
+                AttemptWorker::Registered => {}
+                AttemptWorker::Running { handle, .. } | AttemptWorker::Ready { handle, .. } => {
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                    } else {
+                        timed_out = true;
+                        // Rust cannot preempt a thread that violated the
+                        // cancellation contract. Dropping detaches it, matching
+                        // the Station's existing bounded-drain behavior.
+                        drop(handle);
+                    }
+                }
+            }
+        }
+        timed_out
     }
 
     /// Watch for authority advancing.
@@ -3758,6 +3964,10 @@ enum PerformAction {
         run: crate::exec::RunId,
         attempt: crate::exec::AttemptId,
     },
+    Complete {
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+    },
     Recover {
         run: crate::exec::RunId,
         attempt: crate::exec::AttemptId,
@@ -3819,6 +4029,8 @@ struct RuntimeEffect {
     /// The Attempt a `Try` in this lowering minted — the identity of its
     /// committed `Leased` event. `perform` reports it as the Tried step.
     minted_attempt: Option<crate::exec::AttemptId>,
+    /// The exact lifecycle event appended by this lowering, when any.
+    lifecycle_event: Option<crate::exec::EventId>,
 }
 
 /// The host's bounded Find delegate for one dispatched Attempt.
@@ -3924,12 +4136,22 @@ pub(crate) fn classify_dispatch(failure: crate::exec::DispatchFailure) -> Perfor
             (Failure::CallbackPanicked, FailureClass::Deadline)
         }
         DispatchFailure::Backend(Refusal::Os) => (Failure::CallbackPanicked, FailureClass::Backend),
+        DispatchFailure::Backend(Refusal::OutputLimit) => {
+            (Failure::ResourceLimit, FailureClass::Backend)
+        }
+        DispatchFailure::Backend(Refusal::Terminal(
+            crate::exec::TerminalFailure::InputLimit | crate::exec::TerminalFailure::OutputLimit,
+        )) => (Failure::ResourceLimit, FailureClass::Backend),
+        DispatchFailure::Backend(
+            Refusal::OutputUnavailable | Refusal::InputUnavailable | Refusal::Terminal(_),
+        ) => (Failure::CallbackPanicked, FailureClass::Backend),
         // The Run this Session committed is not visible to its pinned
         // reader: runtime state, never the handler's contract.
         DispatchFailure::Run(_)
         | DispatchFailure::Attempt(_)
         | DispatchFailure::NotBegan(_)
-        | DispatchFailure::BodyRead(_) => (
+        | DispatchFailure::BodyRead(_)
+        | DispatchFailure::UnsupportedRunSchema { .. } => (
             Failure::Rejected(Rejection::ContractViolation),
             FailureClass::Backend,
         ),
@@ -3950,6 +4172,9 @@ fn read_failure(failure: crate::exec::ReadFailure) -> Failure {
             operation: "read reserved Exec state".into(),
             reason: format!("{body:?}"),
         },
+        crate::exec::ReadFailure::UnsupportedRunSchema { .. } => {
+            Failure::Rejected(Rejection::ContractViolation)
+        }
     }
 }
 
@@ -3964,6 +4189,7 @@ fn exec_read_rejection(failure: crate::exec::ReadFailure) -> Rejection {
     match failure {
         crate::exec::ReadFailure::Invalid(invalid) => exec_invalid(invalid),
         crate::exec::ReadFailure::Body(failure) => Rejection::BodyRead(failure),
+        crate::exec::ReadFailure::UnsupportedRunSchema { .. } => Rejection::ContractViolation,
     }
 }
 
@@ -4215,6 +4441,8 @@ fn lower_exec(
                     world: ambient.world.clone(),
                     run,
                     spec: start.spec.clone(),
+                    mode: spec.mode,
+                    terminal: spec.terminal,
                     world_implementation: ambient.implementation,
                     build: start.build,
                     invoker: ambient.principal.actor.clone(),
@@ -4225,6 +4453,7 @@ fn lower_exec(
                     input_digest: start.input_digest(spec).map_err(exec_invalid)?,
                     input_content: start.input.content.clone(),
                     input_content_bytes: start.input.content_bytes,
+                    max_additional_input_bytes: spec.input.max_additional_input_bytes,
                     resources: start.resources.clone(),
                     limits: start.limits,
                     request,
@@ -4372,6 +4601,28 @@ fn lower_exec(
                         return Err(Rejection::ContractViolation);
                     }
                 }
+                if let Some(continuation) = &intent.continuation {
+                    continuation
+                        .input
+                        .validate_with(&spec.input)
+                        .map_err(exec_invalid)?;
+                    let inline = u64::try_from(continuation.input.inline.len())
+                        .map_err(|_| Rejection::LimitExceeded)?;
+                    let total = inline
+                        .checked_add(continuation.input.content_bytes)
+                        .ok_or(Rejection::LimitExceeded)?;
+                    if total == 0
+                        || total > spec.input.max_additional_input_bytes
+                        || continuation.manifest_root != ambient.root
+                    {
+                        return Err(Rejection::ContractViolation);
+                    }
+                    for content in &continuation.input.content {
+                        if snapshot.content_descriptor(content).is_none() {
+                            return Err(Rejection::ContractViolation);
+                        }
+                    }
+                }
                 let mut retained = Vec::new();
                 if let Some(enforcement) = intent.enforcement {
                     if snapshot.content_descriptor(&enforcement).is_none() {
@@ -4381,6 +4632,9 @@ fn lower_exec(
                 }
                 if let Some(checkpoint) = &intent.checkpoint {
                     retained.push(checkpoint.content);
+                }
+                if let Some(continuation) = &intent.continuation {
+                    retained.extend_from_slice(&continuation.input.content);
                 }
                 retained.sort_unstable();
                 retained.dedup();
@@ -4402,6 +4656,7 @@ fn lower_exec(
                         limits: intent.limits,
                         lease: intent.lease.clone(),
                         checkpoint: intent.checkpoint.clone(),
+                        continuation: intent.continuation.clone(),
                     }),
                     spec.access.control.clone(),
                     &retained,
@@ -4559,7 +4814,7 @@ fn lower_lifecycle_event(
         _ => return Err(Rejection::ContractViolation),
     };
     let mut lowered = RuntimeEffect::default();
-    append_run_event(
+    let event = append_run_event(
         &mut lowered,
         &mut state,
         &ambient.world,
@@ -4567,6 +4822,7 @@ fn lower_lifecycle_event(
         demand,
         content,
     )?;
+    lowered.lifecycle_event = Some(event);
     Ok(lowered)
 }
 
@@ -4720,6 +4976,7 @@ fn continuation_try(
         limits: source.limits,
         lease: None,
         checkpoint,
+        continuation: None,
     })
 }
 
@@ -5115,6 +5372,15 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
             crate::exec::ReadFailure::Body(failure) => failure,
             crate::exec::ReadFailure::Invalid(_) => {
                 crate::world::BodyReadFailure::Corrupt(crate::world::BodyReadCoordinate::new(
+                    BodyKey {
+                        world: world.clone(),
+                        body: BodyId::from_bytes(run.as_bytes()),
+                    },
+                    None,
+                ))
+            }
+            crate::exec::ReadFailure::UnsupportedRunSchema { .. } => {
+                crate::world::BodyReadFailure::SchemaAhead(crate::world::BodyReadCoordinate::new(
                     BodyKey {
                         world: world.clone(),
                         body: BodyId::from_bytes(run.as_bytes()),
@@ -5554,6 +5820,15 @@ impl crate::world::BodyReader for SnapshotReader {
             crate::exec::ReadFailure::Body(failure) => failure,
             crate::exec::ReadFailure::Invalid(_) => {
                 crate::world::BodyReadFailure::Corrupt(crate::world::BodyReadCoordinate::new(
+                    BodyKey {
+                        world: world.clone(),
+                        body: BodyId::from_bytes(run.as_bytes()),
+                    },
+                    None,
+                ))
+            }
+            crate::exec::ReadFailure::UnsupportedRunSchema { .. } => {
+                crate::world::BodyReadFailure::SchemaAhead(crate::world::BodyReadCoordinate::new(
                     BodyKey {
                         world: world.clone(),
                         body: BodyId::from_bytes(run.as_bytes()),
@@ -6234,6 +6509,30 @@ impl Session {
 }
 
 impl Session {
+    /// An owned view for one activation worker. This is intentionally not a
+    /// public `Clone` implementation: callers still receive one Session
+    /// handle, while Runtime may keep the exact same authenticated coordinates
+    /// alive for a dispatched Attempt after the drain returns.
+    fn clone_for_attempt(&self) -> Self {
+        Self {
+            space: self.space.clone(),
+            world_id: self.world_id.clone(),
+            world: self.world.clone(),
+            implementation: self.implementation,
+            identity: self.identity.clone(),
+            principal: self.principal.clone(),
+            epoch: self.epoch,
+            limits: self.limits,
+            schemas: self.schemas.clone(),
+            extractor_schema_digest: self.extractor_schema_digest,
+            find_policy: self.find_policy,
+            alive: self.alive.clone(),
+            core: self.core.clone(),
+            authority: self.authority.clone(),
+            registry: self.registry.clone(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         space: mechanics::ids::SpaceId,
@@ -7864,6 +8163,13 @@ impl Session {
             let mut inner = self.core.lock();
             consume_first_use_readies(&mut inner, &effect.exec, &consumed_reader, &ambient.world);
         }
+        // Product-authored cancellation reaches the live performer only after
+        // its CancelAsked event is durable.
+        for command in &effect.exec {
+            if let crate::exec::Cmd::Cancel { run } = command {
+                self.core.cancel_run(*run);
+            }
+        }
         drop(replica);
         Ok(CommittedEffect {
             operation: receipt.request,
@@ -8303,6 +8609,11 @@ impl Session {
                         &ambient.world,
                     );
                 }
+                // Generic Work is the local control-flow landing path. Store
+                // through AttemptControl only after the event is durable.
+                if let crate::exec::Cmd::Cancel { run } = command {
+                    self.core.cancel_run(run);
+                }
                 drop(replica);
                 let reader =
                     SnapshotReader::interactive(reply_snapshot, self.core.body_images.clone());
@@ -8417,6 +8728,10 @@ impl Session {
         >,
     ) -> Result<crate::exec::PerformReport, Failure> {
         self.ensure_live()?;
+        // Remote incorporation does not pass through a local control commit.
+        // Reconcile durable CancelAsked facts into live control handles on
+        // every drain pass so the adopted path reaches the same cancel flag.
+        self.reconcile_cancel_controls()?;
         if !self.core.try_begin_perform() {
             return Ok(crate::exec::PerformReport::default());
         }
@@ -8455,50 +8770,47 @@ impl Session {
                         &[],
                         "exec.perform.began",
                     )?;
-                    self.core.claim_attempt(attempt);
+                    let terminal = self.new_terminal_session(run, attempt)?;
+                    if !self.core.claim_attempt(run, attempt, terminal) {
+                        return Err(Failure::Interrupted);
+                    }
+                    // Close the Began/registration race: a CancelAsked may
+                    // have committed on another Session after this pass's
+                    // initial scan but before the handle became addressable.
+                    self.reconcile_cancel_controls()?;
                     report
                         .steps
                         .push(crate::exec::PerformStep::Began { run, attempt });
                 }
                 Some(PerformAction::Invoke { run, attempt }) => {
-                    match self.invoke_and_complete(package, run, attempt, put_output, read_content)
-                    {
-                        Ok(step) => {
-                            self.core.release_attempt(attempt);
-                            report.steps.push(step);
-                        }
-                        Err(refused) => {
-                            let PerformFailure { failure, class } = refused;
-                            let _ = self.commit_perform_event(
-                                run,
-                                crate::exec::RunEventKind::Failed(crate::exec::Failed {
-                                    run,
-                                    attempt,
-                                    class,
-                                    evidence: Vec::new(),
-                                }),
-                                &[],
-                                "exec.perform.failed",
-                            );
-                            self.core.release_attempt(attempt);
-                            report.steps.push(crate::exec::PerformStep::Failed {
-                                run,
-                                attempt,
-                                class,
-                            });
-                            if matches!(
-                                failure,
-                                Failure::Interrupted
-                                    | Failure::Persistence
-                                    | Failure::PersistenceCause { .. }
-                            ) {
-                                return Err(failure);
-                            }
-                        }
+                    if let Some(read_content) = read_content {
+                        // The old borrowed content facet cannot outlive this
+                        // call. Ordinary production drains use `perform` and
+                        // always hand invocation to the activation worker.
+                        let result = self.invoke_and_complete_inline(
+                            package,
+                            run,
+                            attempt,
+                            put_output,
+                            Some(read_content),
+                        );
+                        self.record_attempt_result(run, attempt, result, &mut report)?;
+                    } else if let Err(failure) = self.launch_invoke(package, run, attempt) {
+                        self.record_attempt_result(run, attempt, Err(failure), &mut report)?;
                     }
                 }
+                Some(PerformAction::Complete { run, attempt }) => {
+                    let result = match self.core.take_attempt_completion(attempt) {
+                        Some(Ok(completion)) => {
+                            self.commit_completion(run, attempt, completion, put_output)
+                        }
+                        Some(Err(failure)) => Err(classify_dispatch(failure)),
+                        None => continue,
+                    };
+                    self.record_attempt_result(run, attempt, result, &mut report)?;
+                }
                 Some(PerformAction::Recover { run, attempt }) => {
-                    self.commit_perform_event(
+                    let ended = self.commit_perform_event(
                         run,
                         crate::exec::RunEventKind::Failed(crate::exec::Failed {
                             run,
@@ -8509,6 +8821,9 @@ impl Session {
                         &[],
                         "exec.perform.unknown",
                     )?;
+                    if let Ok(terminal) = self.core.terminal_session(run, attempt) {
+                        terminal.attempt_ended(ended);
+                    }
                     self.core.release_attempt(attempt);
                     report.steps.push(crate::exec::PerformStep::Failed {
                         run,
@@ -8519,6 +8834,116 @@ impl Session {
             }
         }
         Ok(report)
+    }
+
+    /// Attach to the activation-local terminal for one exact live Attempt.
+    /// This is intentionally crate-local until the exec plane supplies the
+    /// issued attach/read/control authorization checks.
+    pub(crate) fn terminal_attach(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+    ) -> Result<crate::exec::TerminalAttachment, crate::exec::TerminalFailure> {
+        self.core
+            .terminal_session(run, attempt)
+            .map(|held| held.attach())
+    }
+
+    fn record_attempt_result(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+        result: Result<crate::exec::PerformStep, PerformFailure>,
+        report: &mut crate::exec::PerformReport,
+    ) -> Result<(), Failure> {
+        match result {
+            Ok(step) => {
+                self.core.release_attempt(attempt);
+                report.steps.push(step);
+            }
+            Err(refused) => {
+                let PerformFailure { failure, class } = refused;
+                let ended = self.commit_perform_event(
+                    run,
+                    crate::exec::RunEventKind::Failed(crate::exec::Failed {
+                        run,
+                        attempt,
+                        class,
+                        evidence: Vec::new(),
+                    }),
+                    &[],
+                    "exec.perform.failed",
+                );
+                if let (Ok(event), Ok(terminal)) = (ended, self.core.terminal_session(run, attempt))
+                {
+                    terminal.attempt_ended(event);
+                }
+                self.core.release_attempt(attempt);
+                report.steps.push(crate::exec::PerformStep::Failed {
+                    run,
+                    attempt,
+                    class,
+                });
+                if matches!(
+                    failure,
+                    Failure::Interrupted | Failure::Persistence | Failure::PersistenceCause { .. }
+                ) {
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_cancel_controls(&self) -> Result<(), Failure> {
+        let reader = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
+        };
+        for unresolved in
+            crate::exec::scan_unresolved(&reader, &self.world_id).map_err(read_failure)?
+        {
+            if !unresolved.run.cancel_asked.is_empty() {
+                self.core.cancel_run(unresolved.run.id);
+            }
+        }
+        Ok(())
+    }
+
+    fn new_terminal_session(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+    ) -> Result<Option<Arc<crate::exec::TerminalSession>>, Failure> {
+        let reader = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
+        };
+        let (run_state, _, _) = crate::exec::read_committed_run(&reader, &self.world_id, run)
+            .map_err(read_failure)?
+            .ok_or(Failure::Rejected(Rejection::ContractViolation))?;
+        if !run_state
+            .attempts
+            .iter()
+            .any(|candidate| candidate.id == attempt)
+        {
+            return Err(Failure::Rejected(Rejection::ContractViolation));
+        }
+        if matches!(run_state.started.mode, crate::exec::Mode::Unary) {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(crate::exec::TerminalSession::new(
+            run,
+            attempt,
+            run_state.started.limits.progress_bytes,
+            run_state.started.terminal,
+        ))))
     }
 
     fn next_perform_action(
@@ -8578,16 +9003,27 @@ impl Session {
                         attempt: attempt.id,
                     }));
                 }
-                if self.core.is_inflight(attempt.id) {
-                    return Ok(Some(PerformAction::Invoke {
-                        run: item.run.id,
-                        attempt: attempt.id,
-                    }));
+                match self.core.attempt_worker_state(attempt.id) {
+                    Some(AttemptWorkerState::Registered) => {
+                        return Ok(Some(PerformAction::Invoke {
+                            run: item.run.id,
+                            attempt: attempt.id,
+                        }));
+                    }
+                    Some(AttemptWorkerState::Ready) => {
+                        return Ok(Some(PerformAction::Complete {
+                            run: item.run.id,
+                            attempt: attempt.id,
+                        }));
+                    }
+                    Some(AttemptWorkerState::Running) => continue,
+                    None => {
+                        return Ok(Some(PerformAction::Recover {
+                            run: item.run.id,
+                            attempt: attempt.id,
+                        }));
+                    }
                 }
-                return Ok(Some(PerformAction::Recover {
-                    run: item.run.id,
-                    attempt: attempt.id,
-                }));
             }
             if self.can_local_try(package, &item.run) {
                 let intent = self.local_try_intent(&item.run)?;
@@ -8643,6 +9079,11 @@ impl Session {
         let Some(spec) = spec else {
             return false;
         };
+        // Interactive work never silently replays unrecoverable keystrokes.
+        // Only an explicit continuation Try may create its next Attempt.
+        if matches!(spec.mode, crate::exec::Mode::Interactive) {
+            return false;
+        }
         // Restart re-tries from nothing; Checkpoint re-tries from this Run's
         // own latest committed save (or from nothing when none was saved).
         // Both are the same Station mechanically recovering its own work —
@@ -8725,31 +9166,70 @@ impl Session {
         Ok(intent)
     }
 
-    fn invoke_and_complete(
+    fn launch_invoke(
         &self,
         package: &crate::exec::Package,
         run: crate::exec::RunId,
         attempt: crate::exec::AttemptId,
-        put_output: &mut dyn FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
+    ) -> Result<(), PerformFailure> {
+        let control = self.core.attempt_control(attempt).ok_or_else(|| {
+            PerformFailure::backend(Failure::Rejected(Rejection::ContractViolation))
+        })?;
+        let worker_session = self.clone_for_attempt();
+        let worker_package = package.clone();
+        let tick = self.core.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker_control = control.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("lait-exec-{attempt:?}"))
+            .spawn(move || {
+                let completion = worker_session.invoke_only(
+                    &worker_package,
+                    run,
+                    attempt,
+                    &worker_control,
+                    None,
+                );
+                let _ = sender.send(completion);
+                // Completion is transient activation state, so it needs its
+                // own wake rather than waiting for an unrelated durable edit.
+                tick.note_exec();
+            })
+            .map_err(|_| PerformFailure::backend(Failure::CallbackPanicked))?;
+        if let Err((_receiver, handle)) =
+            self.core.install_attempt_worker(attempt, receiver, handle)
+        {
+            control.cancel();
+            let _ = handle.join();
+            return Err(PerformFailure::backend(Failure::Rejected(
+                Rejection::ContractViolation,
+            )));
+        }
+        Ok(())
+    }
+
+    fn invoke_only(
+        &self,
+        package: &crate::exec::Package,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+        control: &crate::exec::AttemptControl,
         read_content: Option<
             &dyn Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, Failure>,
         >,
-    ) -> Result<crate::exec::PerformStep, PerformFailure> {
+    ) -> WorkerCompletion {
         let reader = {
             let inner = self.core.lock();
             if inner.closed {
-                return Err(Failure::Interrupted.into());
+                return Err(crate::exec::DispatchFailure::Backend(
+                    crate::exec::Failure::Cancelled,
+                ));
             }
             SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
         };
-        // The Attempt's bounded Find client evaluates at the Run's parent
-        // Manifest root, never at "latest": the interpretation the Grants
-        // were instantiated against is the one the handler reads.
         let (run_state, _, _) = crate::exec::read_committed_run(&reader, &self.world_id, run)
-            .map_err(read_failure)?
-            .ok_or_else(|| {
-                PerformFailure::backend(Failure::Rejected(Rejection::ContractViolation))
-            })?;
+            .map_err(crate::exec::DispatchFailure::from)?
+            .ok_or(crate::exec::DispatchFailure::Run(run))?;
         let delegate = AttemptFindDelegate {
             session: self,
             pinned: crate::publication::PublicationId::new(
@@ -8759,17 +9239,68 @@ impl Session {
             ),
         };
         let content_delegate = read_content.map(|read| AttemptContentDelegate { read });
+        let terminal = if matches!(run_state.started.mode, crate::exec::Mode::Unary) {
+            None
+        } else {
+            Some(
+                self.core
+                    .terminal_session(run, attempt)
+                    .map_err(crate::exec::Failure::Terminal)
+                    .map_err(crate::exec::DispatchFailure::Backend)?,
+            )
+        };
         let facets = crate::exec::Facets {
             find: Some(&delegate),
             content: content_delegate
                 .as_ref()
                 .map(|held| held as &dyn crate::exec::ContentDelegate),
+            output: terminal
+                .as_deref()
+                .map(|held| held as &dyn crate::exec::OutputSink),
+            input: if matches!(run_state.started.mode, crate::exec::Mode::Interactive) {
+                terminal
+                    .as_deref()
+                    .map(|held| held as &dyn crate::exec::InputSource)
+            } else {
+                None
+            },
         };
-        let cancel = std::sync::atomic::AtomicBool::new(false);
-        let dispatcher = crate::exec::Dispatcher::new(package, crate::exec::InProcess::new());
-        let mut completion = dispatcher
-            .invoke(&reader, &self.world_id, run, attempt, &cancel, facets)
+        crate::exec::Dispatcher::new(package, crate::exec::InProcess::new()).invoke(
+            &reader,
+            &self.world_id,
+            run,
+            attempt,
+            control.cancel_flag(),
+            facets,
+        )
+    }
+
+    fn invoke_and_complete_inline(
+        &self,
+        package: &crate::exec::Package,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+        put_output: &mut dyn FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
+        read_content: Option<
+            &dyn Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, Failure>,
+        >,
+    ) -> Result<crate::exec::PerformStep, PerformFailure> {
+        let control = self.core.attempt_control(attempt).ok_or_else(|| {
+            PerformFailure::backend(Failure::Rejected(Rejection::ContractViolation))
+        })?;
+        let completion = self
+            .invoke_only(package, run, attempt, &control, read_content)
             .map_err(classify_dispatch)?;
+        self.commit_completion(run, attempt, completion, put_output)
+    }
+
+    fn commit_completion(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+        mut completion: crate::exec::Completion,
+        put_output: &mut dyn FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
+    ) -> Result<crate::exec::PerformStep, PerformFailure> {
         // Checkpoint bytes seal through the same host authority as outputs:
         // a Saved event can only name content the host actually holds.
         let staged_blobs: Vec<Vec<u8>> =
@@ -8801,6 +9332,22 @@ impl Session {
                 .bind_output_content(refs, bytes)
                 .map_err(|_| Failure::Rejected(Rejection::ContractViolation))?;
         }
+        if let Some(transcript) = completion.transcript_blob().map(<[u8]>::to_vec) {
+            let content = put_output(&transcript)?;
+            completion
+                .bind_transcript_content(content)
+                .map_err(|_| Failure::Rejected(Rejection::ContractViolation))?;
+        }
+        // Re-read after the worker handoff. A concurrent CancelAsked may have
+        // advanced the Run while the handler was outside the drain; completion
+        // must cite the current durable Began, never a stale snapshot clone.
+        let reader = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted.into());
+            }
+            SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
+        };
         let (run_state, _, _) = crate::exec::read_committed_run(&reader, &self.world_id, run)
             .map_err(read_failure)?
             .ok_or_else(|| {
@@ -8822,12 +9369,29 @@ impl Session {
             .events(run, attempt, vec![began.event])
             .map_err(exec_invalid)?;
         for event in events {
+            let event_id = event.id().map_err(exec_invalid)?;
             let content = match &event.kind {
-                crate::exec::RunEventKind::Returned(returned) => returned.output_content.clone(),
+                crate::exec::RunEventKind::Returned(returned) => {
+                    let mut content = returned.output_content.clone();
+                    if let Some(transcript) = returned.transcript {
+                        content.push(transcript);
+                        content.sort_unstable();
+                        content.dedup();
+                    }
+                    content
+                }
                 crate::exec::RunEventKind::Saved(saved) => vec![saved.checkpoint.content],
                 _ => Vec::new(),
             };
-            self.commit_perform_event(run, event.kind, &content, "exec.perform.complete")?;
+            let terminal = matches!(&event.kind, crate::exec::RunEventKind::Returned(_));
+            let committed =
+                self.commit_perform_event(run, event.kind, &content, "exec.perform.complete")?;
+            debug_assert_eq!(committed, event_id);
+            if terminal {
+                if let Ok(session) = self.core.terminal_session(run, attempt) {
+                    session.attempt_ended(committed);
+                }
+            }
         }
         for child in completion.children() {
             self.commit_perform_cmd(crate::exec::Cmd::Start(child.clone()), "exec.perform.child")?;
@@ -8890,7 +9454,7 @@ impl Session {
         kind: crate::exec::RunEventKind,
         content: &[replica::content::ContentRef],
         label: &'static str,
-    ) -> Result<(), Failure> {
+    ) -> Result<crate::exec::EventId, Failure> {
         let operation = crate::action::RequestId::mint().as_bytes();
         let digest = kind_digest(&kind);
         let (principal, ambient, runtime) = {
@@ -8928,7 +9492,11 @@ impl Session {
             )?;
             (principal, ambient, runtime)
         };
-        self.commit_runtime_effect(&principal, &ambient, operation, digest, label, runtime)
+        let event = runtime
+            .lifecycle_event
+            .ok_or(Failure::Rejected(Rejection::ContractViolation))?;
+        self.commit_runtime_effect(&principal, &ambient, operation, digest, label, runtime)?;
+        Ok(event)
     }
 
     fn commit_runtime_effect(
@@ -9208,6 +9776,16 @@ impl Session {
             &content,
             "exec.test.saved",
         )
+        .map(|_| ())
+    }
+
+    /// Land durable cancellation without invoking either local delivery
+    /// adapter. This is the shape a sync incorporation presents to the next
+    /// drain and lets the adoption scan be exercised deterministically.
+    #[cfg(test)]
+    pub(crate) fn test_land_adopted_cancel(&self, run: crate::exec::RunId) -> Result<(), Failure> {
+        self.commit_perform_cmd(crate::exec::Cmd::Cancel { run }, "exec.test.adopted-cancel")
+            .map(|_| ())
     }
 
     /// Dispose of resolved, uncited Runs whose retention grace has elapsed.
@@ -10730,10 +11308,12 @@ mod reservation_tests {
                 offer: demand("offer"),
                 control: demand("control"),
                 accept: demand("accept"),
+                attach: None,
             },
             input: payload("check.input"),
             output: payload("check.output"),
             mode: crate::exec::Mode::Unary,
+            terminal: crate::exec::TerminalSpec::disabled(),
             resume: crate::exec::Resume::Restart,
             effects: crate::exec::Effects::Pure,
             accept: crate::exec::AcceptRule::World,
@@ -10798,6 +11378,8 @@ mod reservation_tests {
             world: world.clone(),
             run,
             spec: start.spec.clone(),
+            mode: spec.mode,
+            terminal: spec.terminal,
             world_implementation: [0x44; 32],
             build,
             invoker: actor.clone(),
@@ -10808,6 +11390,7 @@ mod reservation_tests {
             input_digest: start.input_digest(&spec).unwrap(),
             input_content: Vec::new(),
             input_content_bytes: 0,
+            max_additional_input_bytes: spec.input.max_additional_input_bytes,
             resources: Vec::new(),
             limits: spec.limits,
             request,
@@ -10850,6 +11433,7 @@ mod reservation_tests {
                 },
                 lease: None,
                 checkpoint: None,
+                continuation: None,
             }),
         )
         .unwrap();
@@ -10893,6 +11477,7 @@ mod reservation_tests {
                 terminal: crate::exec::TerminalClass::Succeeded,
                 usage: Vec::new(),
                 evidence: Vec::new(),
+                transcript: None,
             }),
         )
         .unwrap();
@@ -11436,6 +12021,7 @@ mod reservation_tests {
             },
             lease: None,
             checkpoint: None,
+            continuation: None,
         };
         let retry = lower_exec(
             &[crate::exec::Cmd::Try(intent.clone())],
@@ -11578,6 +12164,7 @@ mod reservation_tests {
             },
             lease: None,
             checkpoint: None,
+            continuation: None,
         }
     }
 

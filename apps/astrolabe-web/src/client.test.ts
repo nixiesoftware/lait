@@ -31,6 +31,8 @@ describe("client transport", () => {
     // in flight while the new one dispatched.
     expect(keyFor({ type: "followWorldChannel", world: "issues", channel: "test" })).toBe("world.channel:issues");
     expect(keyFor({ type: "stopHead", id: "identity:default" })).toBe("head.stop:identity:default");
+    expect(keyFor({ type: "createAgent", name: "Adam", introduction: "A virtual assistant" })).toBe("agent.create");
+    expect(keyFor({ type: "readAgent", agent: "prf_adam" })).toBe("agent.read:prf_adam");
     expect(keyFor({ type: "bookMerge", from: "old", into: "new" })).toBe("book.merge:old:new");
     expect(keyFor({ type: "installMcp", client: "claude", scope: null, name: "lait", agent: null, noAgent: false, project: "/project", world: null, preview: true })).toBe("mcp.preview");
     expect(keyFor({ type: "displayAssignmentPut", device: "receiver", orbit: "space", world: "issues", surface: "board", inputJson: "{}", theme: "dark", staleAfterMs: 60_000, onStale: "keepWithNativeBanner", syncGroup: null, syncMode: "stayInSync", staticDelayMs: 0, expiresAtUnixMs: null })).toBe("display.assignment.put:receiver");
@@ -127,5 +129,35 @@ describe("client transport", () => {
     expect(starting.inFlight).toEqual(["book.import"]);
     await vi.advanceTimersByTimeAsync(500);
     expect((await transport.current()).inFlight).toEqual([]);
+  });
+
+  it("creates an agent identity and carries optimistic revisions through owner mutations", async () => {
+    vi.useFakeTimers();
+    const transport = createFixtureTransport(fixtureClientView);
+    await transport.dispatch({ type: "createAgent", name: "Eve", introduction: "Eve is a virtual assistant." });
+    await vi.advanceTimersByTimeAsync(500);
+
+    let view = await transport.current();
+    expect(view.agent).toMatchObject({ name: "Eve", canManage: true, recordRevision: 1, inventoryRevision: 1 });
+    const profile = view.agent!.profile;
+    expect(view.agents?.some((agent) => agent.profile === profile)).toBe(true);
+
+    await transport.dispatch({
+      type: "setAgentVisibility", agent: profile,
+      recordRevision: 1, inventoryRevision: 1, visibility: "contacts",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    view = await transport.current();
+    expect(view.agent).toMatchObject({ inventoryVisibility: "contacts", inventoryRevision: 2 });
+
+    await transport.dispatch({
+      type: "setAgentVisibility", agent: profile,
+      recordRevision: 1, inventoryRevision: 1, visibility: "private",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    view = await transport.current();
+    expect(view.agent?.inventoryVisibility).toBe("contacts");
+    expect(view.failures[0]).toMatchObject({ key: `agent.visibility:${profile}` });
+    expect(view.failures[0].error).toContain("Stale agent revision");
   });
 });

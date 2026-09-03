@@ -30,7 +30,7 @@ use std::sync::Mutex;
 use correspondence::Contractor;
 use lait_directory::Directory;
 use mechanics::ids::DeviceId;
-use mechanics::kinship::{Audience, ProfileId};
+use mechanics::kinship::{Audience, Party, ProfileId};
 use tokio::sync::watch;
 
 use crate::control::{Request, Response};
@@ -181,6 +181,33 @@ pub struct OwnCard {
     pub epoch: u64,
 }
 
+/// The durable result of directly introducing two locally hosted identities.
+///
+/// The rendered announcements are returned as evidence of exactly what each
+/// side learned. They are ordinary Reach artifacts, not a privileged local
+/// alias, so either side can later refresh the relationship through the same
+/// correspondence protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutualIntroduction {
+    pub primary: ProfileId,
+    pub agent: ProfileId,
+    pub primary_announcement: String,
+    pub agent_announcement: String,
+}
+
+/// One verified ordinary message available to an identity-local supervisor.
+/// The carrier's deposit id and the letter signer remain attached so an
+/// effect cannot be selected by presentation text alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenedMessage {
+    pub deposit_id: String,
+    pub from: DeviceId,
+    pub sender: Option<ProfileId>,
+    pub sent_at: u64,
+    pub provenance_agrees: bool,
+    pub body: String,
+}
+
 /// The identity's correspondence plane, and the durable state under it.
 pub struct CorrespondenceService {
     identity: PathBuf,
@@ -246,6 +273,137 @@ impl CorrespondenceService {
     #[must_use]
     pub fn own_devices(&self) -> watch::Receiver<Option<OwnDevices>> {
         self.own.subscribe()
+    }
+
+    /// The resolved profile this service is standing as.
+    ///
+    /// `None` means restore has not succeeded. Callers that route by identity
+    /// must refuse that state rather than deriving or inventing a profile from
+    /// a filesystem name.
+    #[must_use]
+    pub fn profile(&self) -> Option<ProfileId> {
+        self.plane
+            .lock()
+            .ok()
+            .and_then(|held| held.as_ref().map(|plane| plane.reach.profile().clone()))
+    }
+
+    /// Introduce this identity and another locally hosted identity directly.
+    ///
+    /// Both sides issue normal correspondent-scoped Reach announcements and
+    /// learn the other's signed artifact. No directory, World, or
+    /// request-selected authority participates. A hooked My Card is presented
+    /// by the ordinary Reach rule and a learned presentation may install the
+    /// ordinary introduced contact; neither book is edited by fiat. The two
+    /// Reach stores are written before success is reported; a failed write is
+    /// an error and a retry safely reissues fresh announcements.
+    pub fn mutually_introduce(
+        &self,
+        other: &CorrespondenceService,
+    ) -> Result<MutualIntroduction, String> {
+        if self.identity == other.identity {
+            return Err("an identity cannot be mutually introduced to itself".into());
+        }
+
+        // A supervisor may create or repair more than one relationship at a
+        // time. Lock by durable home so two inverse calls cannot deadlock.
+        if self.identity < other.identity {
+            let mut mine = self
+                .plane
+                .lock()
+                .map_err(|_| "the primary correspondence plane is poisoned".to_string())?;
+            let mut theirs = other
+                .plane
+                .lock()
+                .map_err(|_| "the agent correspondence plane is poisoned".to_string())?;
+            self.introduce_locked(&mut mine, other, &mut theirs)
+        } else {
+            let mut theirs = other
+                .plane
+                .lock()
+                .map_err(|_| "the agent correspondence plane is poisoned".to_string())?;
+            let mut mine = self
+                .plane
+                .lock()
+                .map_err(|_| "the primary correspondence plane is poisoned".to_string())?;
+            self.introduce_locked(&mut mine, other, &mut theirs)
+        }
+    }
+
+    fn introduce_locked(
+        &self,
+        mine: &mut Option<Plane>,
+        other: &CorrespondenceService,
+        theirs: &mut Option<Plane>,
+    ) -> Result<MutualIntroduction, String> {
+        let mine = mine
+            .as_mut()
+            .ok_or_else(|| "the primary reach plane is not restored".to_string())?;
+        let theirs = theirs
+            .as_mut()
+            .ok_or_else(|| "the agent reach plane is not restored".to_string())?;
+
+        let primary = mine.reach.profile().clone();
+        let agent = theirs.reach.profile().clone();
+        if primary == agent {
+            return Err("the two homes resolve to the same correspondence profile".into());
+        }
+
+        let primary_reader = mine.reach.standing();
+        let agent_reader = theirs.reach.standing();
+        let primary_audience =
+            Audience::Correspondent(Party::Device(theirs.reach.canonical_device()));
+        let primary_portrait = self.book.get().and_then(|book| book.my_portrait());
+        let primary_announcement = match &primary_portrait {
+            Some(portrait) => {
+                mine.reach
+                    .announce_presenting(primary_audience, &agent_reader, portrait)
+            }
+            None => mine.reach.announce(primary_audience, &agent_reader),
+        }
+        .map_err(|error| format!("announce the primary identity to the agent: {error}"))?;
+
+        let agent_audience = Audience::Correspondent(Party::Device(mine.reach.canonical_device()));
+        let agent_portrait = other.book.get().and_then(|book| book.my_portrait());
+        let agent_announcement = match &agent_portrait {
+            Some(portrait) => {
+                theirs
+                    .reach
+                    .announce_presenting(agent_audience, &primary_reader, portrait)
+            }
+            None => theirs.reach.announce(agent_audience, &primary_reader),
+        }
+        .map_err(|error| format!("announce the agent identity to the primary: {error}"))?;
+
+        let learned_agent = mine
+            .reach
+            .learn(agent_announcement.clone(), &primary_reader)
+            .map_err(|error| format!("the primary identity could not learn the agent: {error}"))?;
+        let learned_primary = theirs
+            .reach
+            .learn(primary_announcement.clone(), &agent_reader)
+            .map_err(|error| format!("the agent could not learn the primary identity: {error}"))?;
+        if learned_agent != agent || learned_primary != primary {
+            return Err("mutual Reach learning resolved an unexpected profile".into());
+        }
+
+        let primary_announcement = primary_announcement
+            .render()
+            .map_err(|error| format!("render the primary Reach announcement: {error}"))?;
+        let agent_announcement = agent_announcement
+            .render()
+            .map_err(|error| format!("render the agent Reach announcement: {error}"))?;
+
+        self.keep(mine)?;
+        other.keep(theirs)?;
+        self.adopt_into_book(mine, &agent);
+        other.adopt_into_book(theirs, &primary);
+        Ok(MutualIntroduction {
+            primary,
+            agent,
+            primary_announcement,
+            agent_announcement,
+        })
     }
 
     /// Hook the identity's book, once, at wiring time.
@@ -765,6 +923,7 @@ impl CorrespondenceService {
             profile: mine,
             address: plane.reach.address().map(ToOwned::to_owned),
             correspondents: held,
+            agents: Vec::new(),
             resolved: None,
             conversations,
             me: Some(my_device),
@@ -811,6 +970,70 @@ impl CorrespondenceService {
             .map(|plane| plane.reach.canonical_device().as_str().to_owned())
     }
 
+    /// Snapshot every verified ordinary inbound message currently held. This
+    /// is read-only and preserves the deposit/signer/provenance coordinates a
+    /// supervisor needs for stable effect identity and owner gating.
+    pub(crate) fn opened_messages(&self) -> Result<Vec<OpenedMessage>, String> {
+        let held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_ref()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        Ok(plane
+            .reach
+            .opened()
+            .into_iter()
+            .filter_map(|opened| match opened.content {
+                correspondence::Content::Message { body } => Some(OpenedMessage {
+                    deposit_id: opened.id,
+                    sender: plane.reach.profile_of_device(&opened.from),
+                    from: opened.from,
+                    sent_at: opened.sent_at,
+                    provenance_agrees: opened.provenance_agrees,
+                    body,
+                }),
+                correspondence::Content::Invitation { .. } => None,
+            })
+            .collect())
+    }
+
+    /// Send one ordinary message and persist this identity's sent transcript
+    /// before returning the carrier deposit id. The caller must claim its own
+    /// outbox effect first; this function deliberately cannot promise exactly
+    /// once across a crash between remote deposit and local persistence.
+    pub(crate) fn send_message(
+        &self,
+        to: &ProfileId,
+        body: String,
+        now: u64,
+    ) -> Result<String, String> {
+        let mut held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        let contractor = plane
+            .contractor
+            .as_deref()
+            .ok_or_else(|| "no carrier is configured for correspondence".to_string())?;
+        let deposit = plane
+            .reach
+            .send_via(
+                contractor,
+                to,
+                correspondence::Content::Message { body },
+                now,
+            )
+            .map_err(|error| error.to_string())?;
+        self.keep(plane)
+            .map_err(|why| format!("sent correspondence was not persisted: {why}"))?;
+        Ok(deposit)
+    }
+
     /// One standing collect, for the daemon's own background collector: ask
     /// the carrier, file what waited, and persist only when something arrived.
     ///
@@ -829,8 +1052,21 @@ impl CorrespondenceService {
             return Err("no carrier is configured for correspondence".into());
         };
         let collected = plane.reach.collect_via(contractor, now);
-        if collected.filed > 0 {
-            self.keep(plane)?;
+        if !collected.acknowledge.is_empty() {
+            self.keep(plane)
+                .map_err(|why| format!("collected correspondence was not persisted: {why}"))?;
+            plane
+                .reach
+                .acknowledge_via(contractor, &collected.acknowledge, now)
+                .map_err(|why| {
+                    format!("correspondence persisted, but carrier acknowledgement failed: {why:?}")
+                })?;
+        }
+        if !collected.collisions.is_empty() {
+            return Err(format!(
+                "the carrier reused durable deposit ids for conflicting material: {}",
+                collected.collisions.join(", ")
+            ));
         }
         match collected.unasked {
             Some(why) => Err(format!("the carrier could not be asked: {why}")),
@@ -993,13 +1229,32 @@ impl CorrespondenceService {
                     return Response::err(NO_CARRIER);
                 };
                 let collected = plane.reach.collect_via(contractor, now);
-                // Persist only what changed: a collect that filed nothing has
-                // nothing to keep, and a client polling for freshness must
-                // not turn into a disk write per poll.
-                if collected.filed > 0 {
+                // A fetched id is acknowledged only after the complete opened
+                // mailbox is durable. This also persists an in-memory letter
+                // again after an earlier failed commit, and lets a durable
+                // redelivery retry an acknowledgement that failed last time.
+                // A genuinely empty poll still performs no disk write.
+                if !collected.acknowledge.is_empty() {
                     if let Err(error) = self.keep(plane) {
-                        return Response::err(error);
+                        return Response::err(format!(
+                            "collected correspondence was not persisted: {error}"
+                        ));
                     }
+                    if let Err(error) =
+                        plane
+                            .reach
+                            .acknowledge_via(contractor, &collected.acknowledge, now)
+                    {
+                        return Response::err(format!(
+                            "correspondence persisted, but carrier acknowledgement failed: {error:?}"
+                        ));
+                    }
+                }
+                if !collected.collisions.is_empty() {
+                    return Response::err(format!(
+                        "the carrier reused durable deposit ids for conflicting material: {}",
+                        collected.collisions.join(", ")
+                    ));
                 }
                 match collected.unasked {
                     // A carrier that could not be asked is reported, never
@@ -1031,6 +1286,87 @@ impl CorrespondenceService {
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct AckProbe {
+        inner: correspondence::SharedMem,
+        home: PathBuf,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        calls: std::sync::Arc<Mutex<Vec<(Vec<String>, bool)>>>,
+    }
+
+    impl AckProbe {
+        fn new(inner: correspondence::SharedMem, home: &Path, fail: bool) -> Self {
+            Self {
+                inner,
+                home: home.to_path_buf(),
+                fail: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(fail)),
+                calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn permit_acknowledgement(&self) {
+            self.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> Vec<(Vec<String>, bool)> {
+            self.calls.lock().expect("ack observations").clone()
+        }
+    }
+
+    impl correspondence::Carrier for AckProbe {
+        fn deposit(
+            &mut self,
+            from: &mechanics::egress::Egress<'_>,
+            sealed: &correspondence::Sealed,
+            now: u64,
+        ) -> Result<String, correspondence::Refused> {
+            correspondence::Carrier::deposit(&mut self.inner, from, sealed, now)
+        }
+
+        fn collect(&mut self, device: &DeviceId, now: u64) -> correspondence::Missed {
+            correspondence::Carrier::collect(&mut self.inner, device, now)
+        }
+
+        fn acknowledge(
+            &mut self,
+            device: &DeviceId,
+            ids: &[String],
+            now: u64,
+        ) -> Result<usize, correspondence::Refused> {
+            let durable = addressbook::ReachStore::at(&self.home)
+                .load()
+                .ok()
+                .flatten()
+                .is_some_and(|state| ids.iter().all(|id| state.received.contains_key(id)));
+            self.calls
+                .lock()
+                .expect("ack observations")
+                .push((ids.to_vec(), durable));
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(correspondence::Refused::Unreachable(
+                    "acknowledgement refused for the test".into(),
+                ));
+            }
+            correspondence::Carrier::acknowledge(&mut self.inner, device, ids, now)
+        }
+
+        fn block(
+            &mut self,
+            by: &mechanics::egress::Egress<'_>,
+            sender: &DeviceId,
+            blocked: bool,
+            now: u64,
+        ) -> Result<(), correspondence::Refused> {
+            correspondence::Carrier::block(&mut self.inner, by, sender, blocked, now)
+        }
+    }
+
+    impl correspondence::Contractor for AckProbe {
+        fn carrier_for(&self, _seed: &[u8; 32]) -> Box<dyn correspondence::Carrier + Send> {
+            Box::new(self.clone())
+        }
+    }
+
     fn service(tag: &str) -> CorrespondenceService {
         let dir = std::env::temp_dir().join(format!("corr-svc-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1052,6 +1388,35 @@ mod tests {
         let service = CorrespondenceService::open(home);
         service.restore(now_secs()).expect("restore");
         service
+    }
+
+    async fn leave_one_letter(
+        sender: &CorrespondenceService,
+        recipient: &CorrespondenceService,
+        body: &str,
+    ) {
+        let recipient_view = reach(&recipient.handle(Request::ReachShare).await).clone();
+        let card = recipient_view
+            .announcement
+            .expect("recipient publishes a card");
+        let learned = sender
+            .handle(Request::ReachLearn { announcement: card })
+            .await;
+        assert!(matches!(learned, Response::Reach(_)));
+        let sent = sender
+            .handle(Request::CorrespondSend {
+                to: recipient_view.profile,
+                body: body.into(),
+            })
+            .await;
+        assert!(matches!(sent, Response::Reach(_)));
+    }
+
+    fn error_message(response: Response) -> String {
+        match response {
+            Response::Error { message, .. } => message,
+            other => panic!("expected an error response, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1081,6 +1446,118 @@ mod tests {
             blocked: true,
         }));
         assert!(!is_correspondence_request(&Request::BookList));
+    }
+
+    #[tokio::test]
+    async fn collection_commits_before_ack_and_retries_a_failed_ack_after_restart() {
+        let root = std::env::temp_dir().join(format!("corr-ack-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (sender_home, recipient_home) = (root.join("sender"), root.join("recipient"));
+        let shared = correspondence::SharedMem::new();
+        let sender = restored(&sender_home);
+        let recipient = restored(&recipient_home);
+        let probe = AckProbe::new(shared.clone(), &recipient_home, true);
+        let now = now_secs();
+        sender
+            .carry_over_with(Box::new(shared), None, now)
+            .expect("sender carrier");
+        recipient
+            .carry_over_with(Box::new(probe.clone()), None, now)
+            .expect("recipient carrier");
+        leave_one_letter(&sender, &recipient, "survive a failed acknowledgement").await;
+
+        let failed = error_message(recipient.handle(Request::CorrespondCollect).await);
+        assert!(
+            failed.contains("correspondence persisted, but carrier acknowledgement failed"),
+            "acknowledgement failure is distinct: {failed}"
+        );
+        let first_calls = probe.calls();
+        assert_eq!(first_calls.len(), 1);
+        assert_eq!(first_calls[0].0.len(), 1);
+        assert!(
+            first_calls[0].1,
+            "the opened letter was on disk before acknowledgement"
+        );
+
+        // The failed acknowledgement left the carrier copy in place. A fresh
+        // service restores the opened letter, recognizes the exact redelivery,
+        // and retries that same carrier-issued id without filing it twice.
+        probe.permit_acknowledgement();
+        drop(recipient);
+        let recipient = restored(&recipient_home);
+        recipient
+            .carry_over_with(Box::new(probe.clone()), None, now)
+            .expect("recipient carrier after restart");
+        let view = reach(&recipient.handle(Request::CorrespondCollect).await).clone();
+        let calls = probe.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, calls[0].0, "the exact id was retried");
+        assert!(
+            calls[1].1,
+            "the retry was also preceded by a durable commit"
+        );
+        assert_eq!(
+            view.conversations
+                .iter()
+                .flat_map(|conversation| conversation.letters.iter())
+                .filter(|letter| !letter.mine)
+                .count(),
+            1,
+            "the durable redelivery remains one opened letter"
+        );
+
+        let _ = recipient.handle(Request::CorrespondCollect).await;
+        assert_eq!(
+            probe.calls().len(),
+            2,
+            "an empty carrier answer performs no acknowledgement"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_mailbox_commit_never_acknowledges_and_an_in_process_retry_is_safe() {
+        let root = std::env::temp_dir().join(format!("corr-commit-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (sender_home, recipient_home) = (root.join("sender"), root.join("recipient"));
+        let shared = correspondence::SharedMem::new();
+        let sender = restored(&sender_home);
+        let recipient = restored(&recipient_home);
+        let probe = AckProbe::new(shared.clone(), &recipient_home, false);
+        let now = now_secs();
+        sender
+            .carry_over_with(Box::new(shared), None, now)
+            .expect("sender carrier");
+        recipient
+            .carry_over_with(Box::new(probe.clone()), None, now)
+            .expect("recipient carrier");
+        leave_one_letter(&sender, &recipient, "persist me first").await;
+
+        // `atomic_replace` stages here before touching the held file. Making
+        // that exact staging path unusable forces the durable commit to fail
+        // while leaving both the old store and the carrier intact.
+        let staging = recipient_home.join("kinship.bin.tmp");
+        std::fs::create_dir(&staging).expect("block the staging file");
+        let failed = error_message(recipient.handle(Request::CorrespondCollect).await);
+        assert!(
+            failed.contains("collected correspondence was not persisted"),
+            "persistence failure is distinct: {failed}"
+        );
+        assert!(
+            probe.calls().is_empty(),
+            "the carrier was not acknowledged after a failed commit"
+        );
+
+        std::fs::remove_dir(&staging).expect("restore the staging path");
+        let response = recipient.handle(Request::CorrespondCollect).await;
+        assert!(matches!(response, Response::Reach(_)));
+        let calls = probe.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].1,
+            "the retry committed the in-memory opened letter before acknowledgement"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn reach(response: &Response) -> &crate::control::ReachView {

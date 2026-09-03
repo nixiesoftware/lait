@@ -25,12 +25,23 @@ use crate::durable::{atomic_replace, open_or_recover};
 use crate::{Error, Registry};
 
 const MAGIC: &[u8; 8] = b"LAITKIN1";
-const ENVELOPE_FORMAT: u8 = 1;
+const LEGACY_ENVELOPE_FORMAT: u8 = 1;
+const ENVELOPE_FORMAT: u8 = 2;
 const PREFIX: usize = 8 + 1 + 4;
 
 /// The envelope, read from disk. Bounded like every other read in this crate:
 /// a file that grew past this is corrupt, not something to load.
 const MAX_REACH_BYTES: usize = 8 * 1024 * 1024;
+/// One device cannot retain an unbounded number of deposit identities in its
+/// local inbox. The envelope byte bound remains the tighter limit for ordinary
+/// letters; this count also bounds maps made of tiny adversarial entries.
+const MAX_RECEIVED: usize = 8192;
+/// Deposit ids are carrier-issued input. Current ids are 64 hexadecimal bytes;
+/// leave room for another construction without admitting an unbounded map key.
+const MAX_DEPOSIT_ID_BYTES: usize = 256;
+/// An opened letter came from a sealed envelope bounded to 256 KiB. Its durable
+/// encoding must never be larger than the envelope it arrived in.
+const MAX_OPENED_LETTER_BYTES: usize = 256 * 1024;
 
 /// The whole reach state, as one durable value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +80,24 @@ pub struct ReachState {
     /// How this device came to hold the profile.
     #[serde(default)]
     pub origin: Origin,
+    /// Opened, verified correspondence keyed by the carrier's stable deposit id.
+    ///
+    /// Stored as opaque letter bytes because this leaf crate must not depend on
+    /// `correspondence`. That crate decodes and re-verifies them while restoring
+    /// its mailbox; this layer owns only bounded, crash-safe carriage.
+    #[serde(default)]
+    pub received: std::collections::BTreeMap<String, Received>,
+}
+
+/// The durable half of one opened correspondence letter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Received {
+    /// The encoded, signed `correspondence::Letter`.
+    pub letter: Vec<u8>,
+    /// What the carrier said about who deposited it. Corroboration, not proof.
+    pub deposited_by: DeviceId,
+    /// When the carrier observed the deposit.
+    pub arrived_at: u64,
 }
 
 /// How this device came to hold its profile: founded here, or adopted from a
@@ -99,6 +128,36 @@ struct PreCarriage {
     address: Option<String>,
 }
 
+/// Format-one state after genesis carriage and before the inbox was durable.
+///
+/// Kept as an exact old shape rather than relying on `serde(default)`: postcard
+/// is positional, and an absent trailing field is an unexpected end of input.
+#[derive(Serialize, Deserialize)]
+struct PreInbox {
+    epoch: u64,
+    canonical: usize,
+    registry: Registry,
+    sent: std::collections::BTreeMap<String, Vec<Sent>>,
+    address: Option<String>,
+    genesis: Option<DeviceLink>,
+    origin: Origin,
+}
+
+impl From<PreInbox> for ReachState {
+    fn from(held: PreInbox) -> Self {
+        Self {
+            epoch: held.epoch,
+            canonical: held.canonical,
+            registry: held.registry,
+            sent: held.sent,
+            address: held.address,
+            genesis: held.genesis,
+            origin: held.origin,
+            received: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
 impl From<PreCarriage> for ReachState {
     fn from(held: PreCarriage) -> Self {
         Self {
@@ -109,6 +168,7 @@ impl From<PreCarriage> for ReachState {
             address: held.address,
             genesis: None,
             origin: Origin::Founded,
+            received: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -154,6 +214,7 @@ impl ReachStore {
 
     /// Replace what is there. Refuses an epoch below what is already on disk.
     pub fn save(&self, state: &ReachState) -> Result<(), Error> {
+        validate(state)?;
         if let Some(held) = self.load()? {
             if state.epoch < held.epoch {
                 return Err(Error::Invalid("epoch moved backwards"));
@@ -164,6 +225,7 @@ impl ReachStore {
 }
 
 fn encode(state: &ReachState) -> Result<Vec<u8>, Error> {
+    validate(state)?;
     let body = postcard::to_stdvec(state).map_err(|_| Error::Invalid("reach encode"))?;
     let body_len = u32::try_from(body.len()).map_err(|_| Error::Bound("reach body"))?;
     let mut out = Vec::with_capacity(PREFIX.saturating_add(body.len()).saturating_add(32));
@@ -172,7 +234,25 @@ fn encode(state: &ReachState) -> Result<Vec<u8>, Error> {
     out.extend_from_slice(&body_len.to_le_bytes());
     out.extend_from_slice(&body);
     out.extend_from_slice(blake3::hash(&out).as_bytes());
+    if out.len() > MAX_REACH_BYTES {
+        return Err(Error::Bound("reach envelope bytes"));
+    }
     Ok(out)
+}
+
+fn validate(state: &ReachState) -> Result<(), Error> {
+    if state.received.len() > MAX_RECEIVED {
+        return Err(Error::Bound("received letters"));
+    }
+    for (id, received) in &state.received {
+        if id.is_empty() || id.len() > MAX_DEPOSIT_ID_BYTES {
+            return Err(Error::Bound("deposit id bytes"));
+        }
+        if received.letter.is_empty() || received.letter.len() > MAX_OPENED_LETTER_BYTES {
+            return Err(Error::Bound("opened letter bytes"));
+        }
+    }
+    Ok(())
 }
 
 fn decode(bytes: &[u8]) -> Result<ReachState, Error> {
@@ -183,7 +263,7 @@ fn decode(bytes: &[u8]) -> Result<ReachState, Error> {
         return Err(Error::Corrupt("reach magic"));
     }
     let format = *bytes.get(8).ok_or(Error::Corrupt("reach format"))?;
-    if format != ENVELOPE_FORMAT {
+    if !matches!(format, LEGACY_ENVELOPE_FORMAT | ENVELOPE_FORMAT) {
         return Err(Error::UnsupportedVersion(format));
     }
     let len_bytes: [u8; 4] = bytes
@@ -211,11 +291,18 @@ fn decode(bytes: &[u8]) -> Result<ReachState, Error> {
     let body = bytes
         .get(PREFIX..body_end)
         .ok_or(Error::Corrupt("reach body"))?;
-    // The digest above already vouched for the bytes, so a body the current
-    // shape cannot read is an older shape, not damage.
-    postcard::from_bytes::<ReachState>(body)
-        .or_else(|_| postcard::from_bytes::<PreCarriage>(body).map(ReachState::from))
-        .map_err(|_| Error::Corrupt("reach decode"))
+    let state = match format {
+        ENVELOPE_FORMAT => {
+            postcard::from_bytes::<ReachState>(body).map_err(|_| Error::Corrupt("reach decode"))?
+        }
+        LEGACY_ENVELOPE_FORMAT => postcard::from_bytes::<PreInbox>(body)
+            .map(ReachState::from)
+            .or_else(|_| postcard::from_bytes::<PreCarriage>(body).map(ReachState::from))
+            .map_err(|_| Error::Corrupt("reach decode"))?,
+        _ => return Err(Error::UnsupportedVersion(format)),
+    };
+    validate(&state)?;
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -235,6 +322,7 @@ mod tests {
             address: None,
             genesis: Some(genesis),
             origin: Origin::Founded,
+            received: std::collections::BTreeMap::new(),
         }
     }
 
@@ -244,13 +332,31 @@ mod tests {
         dir
     }
 
+    fn envelope(format: u8, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(format);
+        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+        bytes
+    }
+
     #[test]
     fn reach_state_survives_a_round_trip_and_an_absent_file_is_not_an_error() {
         let home = dir("round");
         let store = ReachStore::at(&home);
         assert!(store.load().expect("absent is not corrupt").is_none());
 
-        let written = state(7);
+        let mut written = state(7);
+        written.received.insert(
+            "deposit-7".into(),
+            Received {
+                letter: vec![1, 2, 3],
+                deposited_by: mechanics::actor::device_from_seed(&[70u8; 32]),
+                arrived_at: 70,
+            },
+        );
         store.save(&written).expect("save");
         let read = store.load().expect("load").expect("present");
         assert_eq!(read.epoch, 7);
@@ -263,6 +369,37 @@ mod tests {
             read.genesis, written.genesis,
             "the genesis is carried whole"
         );
+        assert_eq!(read.received, written.received, "the opened inbox survived");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The immediately preceding on-disk shape carried genesis and origin but
+    /// no inbox. It remains a valid identity and starts with an empty mailbox.
+    #[test]
+    fn a_format_one_pre_inbox_envelope_loads_with_an_empty_inbox() {
+        let home = dir("pre-inbox");
+        let store = ReachStore::at(&home);
+        let legacy = state(6);
+        let body = postcard::to_stdvec(&PreInbox {
+            epoch: legacy.epoch,
+            canonical: legacy.canonical,
+            registry: legacy.registry.clone(),
+            sent: legacy.sent.clone(),
+            address: Some("alice.example".into()),
+            genesis: legacy.genesis.clone(),
+            origin: Origin::Adopted {
+                from: mechanics::actor::device_from_seed(&[71u8; 32]),
+                at: 17,
+            },
+        })
+        .unwrap();
+        fs::write(&store.path, envelope(LEGACY_ENVELOPE_FORMAT, &body)).unwrap();
+
+        let read = store.load().unwrap().unwrap();
+        assert_eq!(read.genesis, legacy.genesis);
+        assert_eq!(read.address.as_deref(), Some("alice.example"));
+        assert!(read.received.is_empty());
+        assert!(matches!(read.origin, Origin::Adopted { at: 17, .. }));
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -283,12 +420,7 @@ mod tests {
             address: Some("ada.example".into()),
         })
         .unwrap();
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.push(ENVELOPE_FORMAT);
-        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
-        bytes.extend_from_slice(&body);
-        bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+        let bytes = envelope(LEGACY_ENVELOPE_FORMAT, &body);
         fs::write(&store.path, &bytes).unwrap();
 
         let read = store
@@ -371,6 +503,42 @@ mod tests {
         bytes[8] = 99;
         fs::write(&store.path, &bytes).unwrap();
         assert!(matches!(store.load(), Err(Error::UnsupportedVersion(99))));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unbounded_received_material_is_refused_before_it_is_written() {
+        let home = dir("received-bounds");
+        let store = ReachStore::at(&home);
+        let mut held = state(4);
+        held.received.insert(
+            "x".repeat(MAX_DEPOSIT_ID_BYTES + 1),
+            Received {
+                letter: vec![1],
+                deposited_by: mechanics::actor::device_from_seed(&[72u8; 32]),
+                arrived_at: 1,
+            },
+        );
+        assert!(matches!(
+            store.save(&held),
+            Err(Error::Bound("deposit id bytes"))
+        ));
+        assert!(!store.path.exists(), "a refused state was not staged");
+
+        held.received.clear();
+        held.received.insert(
+            "deposit".into(),
+            Received {
+                letter: vec![0; MAX_OPENED_LETTER_BYTES + 1],
+                deposited_by: mechanics::actor::device_from_seed(&[72u8; 32]),
+                arrived_at: 1,
+            },
+        );
+        assert!(matches!(
+            store.save(&held),
+            Err(Error::Bound("opened letter bytes"))
+        ));
+        assert!(!store.path.exists(), "a refused state was not staged");
         let _ = fs::remove_dir_all(&home);
     }
 }

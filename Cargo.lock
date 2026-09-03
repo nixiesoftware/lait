@@ -82,6 +82,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "fs2",
+ "mechanics",
+ "postcard",
+ "serde",
+ "serde-byte-array",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3949,6 +3963,7 @@ name = "lait"
 version = "0.9.9"
 dependencies = [
  "addressbook",
+ "agent",
  "anyhow",
  "astrolabe-stub",
  "async-trait",

@@ -676,9 +676,21 @@ impl Listener {
             // before a Station could exist — and because running it in this
             // process is what stops it racing this process for the store lock.
             (ControlRoute::Daemon, request)
+                if crate::daemon::agents::is_agent_request(&request) =>
+            {
+                let response =
+                    crate::daemon::agents::handle_control(&self.router, request, act_as.as_deref());
+                let _ = write_line(&mut write_half, &response).await;
+                Flow::Next(reader, write_half)
+            }
+            (ControlRoute::Daemon, request)
                 if crate::daemon::correspondence::is_correspondence_request(&request) =>
             {
-                let response = self.router.correspondence().handle(request).await;
+                // This untyped route is the primary person's correspondence.
+                // `act_as` is a World signer selector and does not silently
+                // become a mailbox or owner context here.
+                let mut response = self.router.correspondence().handle(request).await;
+                crate::daemon::agents::decorate_reach(&self.router, &mut response);
                 let _ = write_line(&mut write_half, &response).await;
                 Flow::Next(reader, write_half)
             }
@@ -749,25 +761,75 @@ impl Listener {
                 // The book is the one namer, and this funnel is where it
                 // speaks: a Station answers with bare ids, and the identity
                 // that owns the names decorates the reply on its way out. The
-                // same seam names a just-provisioned agent — the Station has
-                // no reach into the identity-scoped book, so it reports the
-                // actor and the daemon authors the Card.
-                let provisioned = match &request {
-                    Request::AgentProvision { name } => Some(name.clone()),
-                    _ => None,
-                };
+                // same seam decorates identity facts without granting the
+                // Station access to the identity-scoped book.
                 let space = match &route {
                     ControlRoute::Orbit { address } | ControlRoute::World { address, .. } => {
                         Some(address.space.clone())
                     }
                     ControlRoute::Daemon => None,
                 };
+                let (request, sponsored_agent) = match request {
+                    Request::AgentSponsor { agent } => {
+                        let key = match crate::daemon::agents::sponsorship_key(
+                            &self.router,
+                            &agent,
+                            act_as.as_deref(),
+                        ) {
+                            Ok(key) => key,
+                            Err(error) => {
+                                let response = Response::err(error.to_string());
+                                let _ = write_line(&mut write_half, &response).await;
+                                return Flow::Next(reader, write_half);
+                            }
+                        };
+                        let address = match &route {
+                            ControlRoute::Orbit { address }
+                            | ControlRoute::World { address, .. } => address,
+                            ControlRoute::Daemon => {
+                                let response = Response::err(
+                                    "agent sponsorship must address a Space".to_string(),
+                                );
+                                let _ = write_line(&mut write_half, &response).await;
+                                return Flow::Next(reader, write_half);
+                            }
+                        };
+                        let actor = match self.router.incept_global_agent(address, &agent).await {
+                            Ok(actor) => actor,
+                            Err(error) => {
+                                let response = Response::err(format!(
+                                    "the agent could not introduce itself to this Space: {error:#}"
+                                ));
+                                let _ = write_line(&mut write_half, &response).await;
+                                return Flow::Next(reader, write_half);
+                            }
+                        };
+                        (
+                            Request::AgentAdd { key },
+                            Some((agent, actor.as_str().to_string())),
+                        )
+                    }
+                    request => (request, None),
+                };
                 let mut response = self
                     .router
-                    .request_routed(route, &request, act_as.as_deref())
+                    .request_routed(
+                        route,
+                        &request,
+                        if sponsored_agent.is_some() {
+                            None
+                        } else {
+                            act_as.as_deref()
+                        },
+                    )
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}")));
                 if let Some(space) = &space {
+                    if let (Some((agent, actor)), Response::Ok { .. }) =
+                        (sponsored_agent.as_ref(), &response)
+                    {
+                        self.router.asks().grant(space.as_str(), agent, Some(actor));
+                    }
                     if matches!(
                         response,
                         Response::Members { .. } | Response::Who { .. } | Response::Seeds { .. }
@@ -775,27 +837,6 @@ impl Listener {
                         if let Ok(book) = self.router.book() {
                             book.decorate(space, &mut response);
                         }
-                    }
-                    if let (
-                        Some(name),
-                        Response::Ok {
-                            message: Some(message),
-                        },
-                    ) = (&provisioned, &response)
-                    {
-                        // The reply's `actor …` line is part of the provision
-                        // contract (see hosting's provision arm).
-                        if let Some(actor) =
-                            message.lines().find_map(|line| line.strip_prefix("actor "))
-                        {
-                            if let Ok(book) = self.router.book() {
-                                book.name_agent(space, actor.trim(), name);
-                            }
-                        }
-                        let actor = message.lines().find_map(|line| line.strip_prefix("actor "));
-                        self.router
-                            .asks()
-                            .grant(space.as_str(), name, actor.map(str::trim));
                     }
                     if let (Request::Whoami, Some(name)) = (&request, act_as.as_deref()) {
                         // A named agent that is not a member is asking this
