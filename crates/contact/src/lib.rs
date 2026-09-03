@@ -13,6 +13,7 @@ mod protocol;
 /// machines it drives are transport-free and always available in `protocol`.
 #[cfg(feature = "wire")]
 pub mod pull;
+pub mod snapshot;
 pub mod wire;
 
 pub use protocol::*;

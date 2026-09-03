@@ -20,6 +20,7 @@ wire = ["dep:comms"]
 [dependencies]
 mechanics = { path = "../mechanics" }
 replica = { path = "../replica" }
+journal = { path = "../journal" }
 # The transport seam the initiator drives; wasm-clean end to end. Optional,
 # behind `wire`.
 comms = { path = "../comms", optional = true }
