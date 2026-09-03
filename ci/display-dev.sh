@@ -34,6 +34,7 @@
 set -euo pipefail
 
 PORT=7443
+HOME_DIR=""
 STATE_DIR="${TMPDIR:-/tmp}"
 STATE_DIR="${STATE_DIR%/}"
 PID_FILE="$STATE_DIR/lait-display-dev.pid"
@@ -274,11 +275,11 @@ cmd_up() {
   if [ -n "$DUMP_DIR" ]; then
     mkdir -p "$DUMP_DIR"
     echo "  LAIT_DISPLAY_DUMP_DIR=$DUMP_DIR"
-    RUST_LOG="$rust_log" LAIT_DISPLAY_DUMP_DIR="$DUMP_DIR" \
-      nohup "$binary" daemon >"$LOG_FILE" 2>&1 </dev/null &
+    RUST_LOG="$rust_log" LAIT_DISPLAY_PORT="$PORT" LAIT_DISPLAY_DUMP_DIR="$DUMP_DIR" \
+      nohup "$binary" daemon ${HOME_DIR:+--home "$HOME_DIR"} >"$LOG_FILE" 2>&1 </dev/null &
   else
-    RUST_LOG="$rust_log" \
-      nohup "$binary" daemon >"$LOG_FILE" 2>&1 </dev/null &
+    RUST_LOG="$rust_log" LAIT_DISPLAY_PORT="$PORT" \
+      nohup "$binary" daemon ${HOME_DIR:+--home "$HOME_DIR"} >"$LOG_FILE" 2>&1 </dev/null &
   fi
   local pid=$!
   disown "$pid" 2>/dev/null || true
@@ -385,6 +386,8 @@ parse_up_flags() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --log) [ $# -ge 2 ] || die "--log needs a path"; LOG_FILE="$2"; shift 2 ;;
+      --port) [ $# -ge 2 ] || die "--port needs a number"; PORT="$2"; shift 2 ;;
+      --home) [ $# -ge 2 ] || die "--home needs a directory"; HOME_DIR="$2"; shift 2 ;;
       --log=*) LOG_FILE="${1#--log=}"; shift ;;
       --dump) [ $# -ge 2 ] || die "--dump needs a directory"; DUMP_DIR="$2"; shift 2 ;;
       --dump=*) DUMP_DIR="${1#--dump=}"; shift ;;

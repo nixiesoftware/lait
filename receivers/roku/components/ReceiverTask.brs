@@ -872,8 +872,17 @@ sub AstrolabeRun()
     end if
     m.credential = AstrolabeLoadCredential()
     if m.credential <> invalid and m.credential.origin <> m.origin
-        AstrolabePublish({ kind: "message", title: "Coordinator changed", body: "Stored identity belongs to another origin." })
-        return
+        ' A bootstrap that carries a code is an instruction to enrol here: the
+        ' code was minted by a controller for this television, which is the
+        ' same trust the stored identity was granted under. Without one, an
+        ' identity from another origin is refused rather than reused.
+        if m.rendezvous <> invalid
+            AstrolabeClearCredential()
+            m.credential = invalid
+        else
+            AstrolabePublish({ kind: "message", title: "Coordinator changed", body: "Stored identity belongs to another origin." })
+            return
+        end if
     end if
     if m.credential = invalid
         AstrolabePair()
