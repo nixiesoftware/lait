@@ -219,7 +219,23 @@ impl Listener {
             .name(control)
             .create_tokio()
             .context("bind Lait daemon control channel")?;
-        tracing::info!("Lait daemon online");
+        // Which binary this is, said once where every debugging session
+        // starts. The version is stamped at build; the executable's path and
+        // mtime are facts about the file that is actually running.
+        let executable = std::env::current_exe().ok();
+        let modified_unix_ms = executable
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        tracing::info!(
+            version = crate::VERSION,
+            executable = %executable.as_deref().map_or_else(|| "absent".to_string(), |path| path.display().to_string()),
+            executable_modified_unix_ms = ?modified_unix_ms,
+            pid = std::process::id(),
+            "Lait daemon online"
+        );
 
         let mut stop = self.stopping.subscribe();
         let mut connections = tokio::task::JoinSet::new();

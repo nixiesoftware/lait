@@ -1,0 +1,14 @@
+{
+  "name": "display-probe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless signage receiver: plays a lait coordinator's HLS program as a strict live client and reports numbers",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "probe": "node probe.mjs",
+    "test": "node --test probe.test.mjs"
+  }
+}

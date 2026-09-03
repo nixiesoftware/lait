@@ -12,6 +12,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+# Re-admitting a local World registration after a re-stage: the digests are
+# the ones `src/world/local.rs` takes, over the manifest it parses.
+blake3 = "1"
+directories = "5"
+serde_json = "1"
+world-interface = { path = "../../crates/world-interface" }
 
 [dev-dependencies]
 tempfile = "3"

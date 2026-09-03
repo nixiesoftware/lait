@@ -352,6 +352,55 @@ pub struct WatchingTyping {
 /// contract, not a display string.
 pub const AGENT_GROUP: &str = "Agents";
 
+/// Which code is running at every layer of the display path. Every field
+/// is a measurement or `None`; nothing here is inferred.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayProvenanceView {
+    /// `lait --version` of the running daemon.
+    pub daemon_version: String,
+    pub daemon_pid: u32,
+    /// The executable actually running, and its file's mtime — true even
+    /// when the stamped version is stale against a dirty tree.
+    pub daemon_executable: Option<String>,
+    pub daemon_executable_modified_unix_ms: Option<u64>,
+    pub daemon_started_unix_ms: u64,
+    pub worlds: Vec<DisplayWorldProvenanceView>,
+    pub devices: Vec<DisplayDeviceProvenanceView>,
+}
+
+/// A local World tree the daemon serves, and whether it is still the tree
+/// that was admitted.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldProvenanceView {
+    pub key: String,
+    pub dir: String,
+    pub world: Option<String>,
+    pub version: Option<String>,
+    /// `unchanged`, `changed`, or `unrecorded` (admitted before digests were kept).
+    pub sameness: String,
+}
+
+/// One receiver: what it says it runs and what this daemon has seen of it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayDeviceProvenanceView {
+    pub device: String,
+    pub label: String,
+    pub platform: String,
+    pub revoked_at_unix_ms: Option<u64>,
+    /// The build it declared when it enrolled.
+    pub enrolled_build: String,
+    /// The build its last health report carried, and when that arrived.
+    pub reported_build: Option<String>,
+    pub reported_at_unix_ms: Option<u64>,
+    pub assignment: Option<String>,
+    /// Whether an unexpired stream ticket exists for it in this process.
+    pub holds_hls_ticket: bool,
+    /// When its stream was last asked for, or `None` if never in this process.
+    pub stream_served_at_unix_ms: Option<u64>,
+    /// `running`, `idle`, `retired`, or `None` when no producer exists.
+    pub producer: Option<String>,
+}
+
 /// Astrolabe's controller-facing view of the identity daemon's display service.
 /// Receiver credentials and canonical package input never cross this plane.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -713,6 +762,13 @@ pub struct DisplayRendezvousAssignmentView {
 pub enum Request {
     // ---- identity-scoped Astrolabe display coordination ----
     DisplayStatus,
+    /// Which code is running, at every layer of the display path: this
+    /// daemon's build and executable, the local World trees and whether
+    /// they still match their admission, and per receiver the build it
+    /// reports, when it last spoke, whether it holds a stream ticket, when
+    /// its stream was last served, and the state of its producer. The
+    /// answer to "is the screen running what I think it is", measured.
+    DisplayProvenance,
     DisplayPairingApprove {
         pairing: String,
         label: String,
@@ -2031,6 +2087,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         // ---- Lifecycle/deployment: daemon process + node-local config ----
         Request::Diagnose { .. }
         | Request::DisplayStatus
+        | Request::DisplayProvenance
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
         | Request::DisplayRendezvousMint { .. }
@@ -2133,6 +2190,7 @@ pub fn representative_requests() -> Vec<Request> {
     let find_step = runtime::find::StepId::new(1).expect("one is a nonzero Step id");
     vec![
         Request::DisplayStatus,
+        Request::DisplayProvenance,
         Request::DisplayPairingApprove {
             pairing: s(),
             label: s(),
@@ -2879,6 +2937,8 @@ pub enum Response {
     },
     /// Identity-scoped display coordination state for Astrolabe.
     Display(Box<DisplayCoordinatorView>),
+    /// Which code runs at every layer of the display path.
+    DisplayProvenance(Box<DisplayProvenanceView>),
     /// One rendered surface for a member screen to present.
     DisplayPresentation(Box<DisplayPresentationView>),
     /// A code just minted for a television to enter.

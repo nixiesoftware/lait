@@ -20,6 +20,7 @@ pub fn is_read(req: &Request) -> bool {
     match req {
         Request::Members
         | Request::DisplayStatus
+        | Request::DisplayProvenance
         | Request::MemberLog
         | Request::DeviceInvite
         | Request::DeviceList
@@ -312,6 +313,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         // Display coordination is daemon-scoped but intentionally reserved for
         // the native Astrolabe controller, not the browser host-RPC surface.
         | Request::DisplayStatus
+        | Request::DisplayProvenance
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
         | Request::DisplayRendezvousMint { .. }

@@ -63,3 +63,5 @@ apps/astrolabe/pubspec_overrides.yaml
 # Raspberry Pi Signage image inputs and multi-gigabyte build products.
 /ops/pi-signage/.cache/
 __pycache__/
+
+tools/display-probe/node_modules

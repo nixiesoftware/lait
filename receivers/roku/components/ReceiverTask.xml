@@ -4,6 +4,7 @@
     <field id="viewModel" type="assocarray" alwaysNotify="true"/>
     <field id="command" type="string" alwaysNotify="true"/>
   </interface>
+  <script type="text/brightscript" uri="pkg:/source/Build.brs"/>
   <script type="text/brightscript" uri="pkg:/source/Protocol.brs"/>
   <script type="text/brightscript" uri="pkg:/source/Store.brs"/>
   <script type="text/brightscript" uri="pkg:/components/ReceiverTask.brs"/>

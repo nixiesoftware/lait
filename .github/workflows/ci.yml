@@ -396,6 +396,16 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --locked --doc --all-features
 
+      # The signage stream, decoded by a real demuxer. The in-tree walker
+      # (src/display/conformance.rs) checks what it knows to check; ffmpeg
+      # found the continuity-counter restart it did not yet know about. These
+      # tests are `#[ignore]`d because they need the binary, which only this
+      # job installs.
+      - name: Install ffmpeg (stream conformance)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Stream conformance (ffmpeg decodes what the producer serves)
+        run: cargo test -p lait --lib --locked --all-features -- --ignored ffmpeg_decodes
+
       - name: Portability guard (no unix-only APIs in control/lock path)
         shell: bash
         run: bash ci/portability-guard.sh

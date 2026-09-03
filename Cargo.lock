@@ -9639,7 +9639,11 @@ name = "world-stage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "directories",
+ "serde_json",
  "tempfile",
+ "world-interface",
 ]
 
 [[package]]
