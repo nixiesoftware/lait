@@ -96,7 +96,7 @@ impl ConvergenceOutcome {
 /// **untrusted** bytes exactly as received. The transport (Contact machine)
 /// has proven only transcript completeness; every legitimacy property is
 /// established by [`crate::Replica::validate_contact`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StagedContactMaterial {
     /// The authority-section records: mechanics authority material and the
     /// signed `BodyTransactionV1` records, byte-canonical.

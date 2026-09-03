@@ -309,6 +309,43 @@ fn a_valid_staging_validates_and_incorporates_with_authority_first() {
     );
 }
 
+/// The keystone of daemon-less, CDN-backed hosting: the staged material a peer
+/// would serve over a live Contact survives a round trip through plain bytes —
+/// so a bucket object can carry it. Serialize the staging, read it back, and
+/// validate + incorporate the *deserialized* copy into a fresh Replica; the
+/// data arrives intact. Validation still runs on the untrusted bytes, so the
+/// bucket stays a dumb, untrusted transport — exactly like the live peer.
+#[test]
+fn staged_material_round_trips_through_bytes_a_bucket_could_carry() {
+    let mut a = keyed_replica();
+    commit_note(&mut a, [1u8; 16], &body(1), "hello").unwrap();
+    let staged = stage(&a);
+
+    // What a bucket blob holds, and what a cold reader pulls back down.
+    let blob = postcard::to_stdvec(&staged).unwrap();
+    let restored: StagedContactMaterial = postcard::from_bytes(&blob).unwrap();
+
+    let mut b = keyed_replica();
+    let (space, signer) = ctx_parts();
+    let ctx = CommitContext {
+        space: &space,
+        signer: &signer,
+        authority_frontier: authority_frontier(),
+    };
+    let mut incorporator = RecordingIncorporator::default();
+    let bundle = b
+        .validate_contact(&restored, &WriterAuthorized, &mut incorporator)
+        .unwrap();
+    let outcome = b
+        .incorporate_bundle(&ctx, bundle, &WriterAuthorized)
+        .unwrap();
+    assert_eq!(outcome.accepted, 1);
+    assert_eq!(
+        b.read_collaborative(&body(1)).unwrap().registers["text"],
+        b"hello".to_vec()
+    );
+}
+
 #[test]
 fn adversarial_stagings_are_rejected_whole() {
     let mut a = keyed_replica();
