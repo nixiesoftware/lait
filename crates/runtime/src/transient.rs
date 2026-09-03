@@ -639,3 +639,39 @@ impl LiveControl {
 /// How long a caret is held before it is sent, exposed so a client and the
 /// Station agree without either mirroring a literal.
 pub const CURSOR_COALESCE: Duration = deadline::CURSOR_COALESCE;
+
+#[cfg(test)]
+mod attribution_guard {
+    use super::*;
+
+    /// A `TransientItem` carries NO station: identity is the connection it was
+    /// admitted on, never a field a peer could set. Two callers lean on this —
+    /// the daemon binds the item to the transport-authenticated peer, and the
+    /// browser tab's `live_entry` attributes every received caret to its single
+    /// Live peer (the responder), which is correct ONLY while one connection
+    /// carries one peer's presence.
+    ///
+    /// This is an exhaustive destructure, so adding a `station` (or any field)
+    /// stops it compiling — the forcing function that sends whoever adds
+    /// relayed, multi-peer transient material to `wasm-probe`/`porthole`
+    /// `handle.rs::live_entry`, whose responder-attribution would otherwise
+    /// silently mislabel every relayed peer as the responder.
+    #[test]
+    fn a_transient_item_carries_no_station() {
+        let item = TransientItem {
+            connection_epoch: [0u8; 16],
+            seq: 0,
+            scope: Target::Body {
+                world: "w".into(),
+                body: [0u8; 16],
+            },
+            payload: TransientPayload::Presence,
+        };
+        let TransientItem {
+            connection_epoch: _,
+            seq: _,
+            scope: _,
+            payload: _,
+        } = item;
+    }
+}

@@ -140,8 +140,9 @@ impl BrowserEngineHandle {
     /// send half of live carets. The viewer gives an issue reff, a field, and a
     /// `u64` cursor position; the tab resolves the world-specific body id
     /// through the runner (`transient_body`, world-agnostic), mints a
-    /// `fabric::Anchor` for the position against the same pinned publication its
-    /// reads answer from, and sends it as a datagram bound to the Live session.
+    /// `fabric::Anchor` for the position against the LIVE Replica (the pinned
+    /// publication a daemon anchors against is never built on wasm), and sends
+    /// it as a datagram bound to the Live session.
     /// `false` when the tab holds no Live session, the position is not
     /// anchorable, or the datagram did not fit — carets are best-effort by
     /// design. The subscribe is sent once per field, then steady-state carets

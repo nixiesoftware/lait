@@ -2606,10 +2606,13 @@ impl StationCore {
     }
 
     /// Read Replica-owned administrative state without publishing a Runtime
-    /// generation. This is intentionally not used by World query, Find, live
-    /// anchor resolution, or projection code: those paths pin an immutable
+    /// generation. Natively this is not used by World query, Find, live anchor
+    /// resolution, or projection code: those paths pin an immutable
     /// `ReadSnapshot`/`WorldPublication` and never queue behind the mutation
-    /// lane.
+    /// lane. The one exception is wasm: `browser::Station::anchor` routes live
+    /// anchor resolution through here because the publication worker never runs
+    /// in a tab, so the pinned snapshot is never built — the live Replica is the
+    /// only image that holds the pulled bodies there.
     pub fn with_replica_read<T>(
         &self,
         f: impl FnOnce(&replica::Replica) -> Result<T, replica::transaction::commit::Failure>,
