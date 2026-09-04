@@ -279,6 +279,32 @@ impl Station {
         }
     }
 
+    /// Ring a coarse RESET for the current durable state — the tab's only honest
+    /// signal for a STRUCTURAL local write (a project, a milestone, a rename)
+    /// that changes a catalog the tab, holding the World as an opaque runner,
+    /// cannot route a per-plane invalidation for. Every active resource re-reads
+    /// and the app stays alive; the daemon does this precisely, a tab
+    /// necessarily coarsely. Collaborative document edits do NOT use this — they
+    /// ride the session lane and carry their own exact per-document observation,
+    /// so keystrokes never trigger a whole-view refresh.
+    pub fn ring_reset(&self) {
+        if let Ok(frontier) = self
+            .core
+            .with_replica_read(|replica| Ok(replica.frontier()))
+        {
+            self.core.broadcaster.publish_reset(frontier, false);
+        }
+    }
+
+    /// The current replica frontier — the cheap before/after probe a caller
+    /// uses to tell whether a link-lane RPC actually wrote (advancing the
+    /// frontier) or only read.
+    pub fn frontier(&self) -> Option<replica::frontier::ReplicaFrontier> {
+        self.core
+            .with_replica_read(|replica| Ok(replica.frontier()))
+            .ok()
+    }
+
     /// Build this tab's outbound excess — the transfer it PUSHES to a responder
     /// under symmetric convergence so its writes converge OUT (nothing dials a
     /// tab, so it pushes on the dial it makes). Mirrors the native driver's

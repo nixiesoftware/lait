@@ -119,11 +119,23 @@ impl BrowserEngineHandle {
     pub fn handle_link(&self, frame_json: &str) -> Result<String, JsValue> {
         let request =
             serde_json::from_str(frame_json).map_err(|e| js_err("the frame does not decode", e))?;
-        match self.engine.handle_link(request) {
+        // A structural write — a new project, a milestone, a rename — reaches the
+        // engine through this lane and changes a catalog the tab cannot route a
+        // per-plane doorbell for. So bracket the call with the frontier: if it
+        // advanced, the write was real, and a coarse RESET re-reads every active
+        // resource, keeping the sidebar and every other surface alive. A query
+        // (or a refused write) moves nothing and rings nothing; a collaborative
+        // edit takes the session lane, not this one.
+        let before = self.station.frontier();
+        let answer = match self.engine.handle_link(request) {
             Some(response) => serde_json::to_string(&response)
                 .map_err(|e| js_err("the response does not encode", e)),
             None => Ok("null".to_string()),
+        };
+        if before.is_some() && self.station.frontier() != before {
+            self.station.ring_reset();
         }
+        answer
     }
 
     /// Answer one decoded session frame the viewer's `workerSession` sent —
