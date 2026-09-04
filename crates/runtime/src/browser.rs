@@ -287,12 +287,19 @@ impl Station {
     /// necessarily coarsely. Collaborative document edits do NOT use this — they
     /// ride the session lane and carry their own exact per-document observation,
     /// so keystrokes never trigger a whole-view refresh.
-    pub fn ring_reset(&self) {
+    ///
+    /// `authority` marks the reset as authority-relevant (a membership or grant
+    /// change), so surfaces derived from the authority plane — the member
+    /// roster, the invite list — re-read too.
+    pub fn ring_reset(&self, authority: bool) {
         if let Ok(frontier) = self
             .core
             .with_replica_read(|replica| Ok(replica.frontier()))
         {
-            self.core.broadcaster.publish_reset(frontier, false);
+            self.core.broadcaster.publish_reset(frontier, authority);
+        }
+        if authority {
+            self.core.note_authority_advanced();
         }
     }
 
