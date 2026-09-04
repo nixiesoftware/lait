@@ -23,7 +23,9 @@ use mechanics::actor::device_from_seed;
 use mechanics::ids::SpaceId;
 use mechanics::station::{Epoch, Key};
 use replica::transaction::{CommitContext, SeedSigner};
-use runtime::world::{AuthorityView, Builder, Catalog, World};
+#[cfg(feature = "proof")]
+use runtime::world::Catalog;
+use runtime::world::{AuthorityView, Builder, World};
 use runtime::{AffectedWorldPublication, ObservationStream};
 use wasm_bindgen::prelude::*;
 use world_runner::wasm_abi::GuestInit;
@@ -66,6 +68,7 @@ pub struct BrowserEngineHandle {
     /// declares the identical schema set on its fresh Replica. Convergence
     /// classifies at import and never reinterprets, so a restore that declares
     /// a different set (or none) retains every body opaquely.
+    #[cfg(feature = "proof")]
     registry: Catalog,
     /// The serving mount — the id the viewer keys its selected Space on
     /// (`ServedSpaceRow.id`), and therefore the id a doorbell ring must carry so
@@ -654,6 +657,7 @@ impl BrowserEngineHandle {
     /// the restored keyring, and 25 bodies opaque anyway. What was actually
     /// missing was the schema declaration on the restored Replica. Keep the
     /// geometry: it is what separates "cannot decrypt" from "did not classify".
+    #[cfg(feature = "proof")]
     pub fn verify_snapshot_roundtrip(&self) -> Result<String, JsValue> {
         let bytes = self.snapshot()?;
         let snapshot = contact::snapshot::SpaceSnapshot::decode(&bytes)
@@ -701,6 +705,7 @@ impl BrowserEngineHandle {
 /// How many of a replica's collaborative bodies read back decrypted — a body
 /// that will not `read_collaborative` is one whose epoch key this authority
 /// cannot open.
+#[cfg(feature = "proof")]
 fn count_decrypted(replica: &replica::Replica) -> usize {
     replica
         .body_keys()
@@ -710,6 +715,7 @@ fn count_decrypted(replica: &replica::Replica) -> usize {
 }
 
 /// First four bytes of an epoch id, as the diagnostic's short name for it.
+#[cfg(feature = "proof")]
 fn short_epoch(id: &[u8; 16]) -> String {
     id[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -719,6 +725,7 @@ fn short_epoch(id: &[u8; 16]) -> String {
 /// for (marking this device's own). The three sets side by side are what
 /// decides whether the epoch-key-history gap is a retention problem (fix in
 /// the ledger) or a capture problem (re-seal at capture).
+#[cfg(feature = "proof")]
 fn authority_epochs(authority: &SharedLedgerAuthority) -> String {
     let mut inner = authority.0.lock().unwrap_or_else(|p| p.into_inner());
     let me = inner.me.clone();
@@ -746,7 +753,12 @@ fn authority_epochs(authority: &SharedLedgerAuthority) -> String {
     let sealed: Vec<String> = per_epoch
         .iter()
         .map(|(id, (n, mine))| {
-            format!("{}x{}{}", short_epoch(id), n, if *mine { "+me" } else { "" })
+            format!(
+                "{}x{}{}",
+                short_epoch(id),
+                n,
+                if *mine { "+me" } else { "" }
+            )
         })
         .collect();
     format!(
@@ -760,6 +772,7 @@ fn authority_epochs(authority: &SharedLedgerAuthority) -> String {
 /// The epochs the snapshot's material actually references: per-epoch artifact
 /// counts from every body transaction's descriptors, beside the sealed
 /// envelopes the authority section carries (marking this device's own).
+#[cfg(feature = "proof")]
 fn snapshot_epoch_geometry(
     snapshot: &contact::snapshot::SpaceSnapshot,
     me: &mechanics::ids::DeviceId,
@@ -796,15 +809,25 @@ fn snapshot_epoch_geometry(
     let sealed: Vec<String> = sealed
         .iter()
         .map(|(id, (n, mine))| {
-            format!("{}x{}{}", short_epoch(id), n, if *mine { "+me" } else { "" })
+            format!(
+                "{}x{}{}",
+                short_epoch(id),
+                n,
+                if *mine { "+me" } else { "" }
+            )
         })
         .collect();
-    format!("body_epochs=[{}] sealed=[{}]", body.join(","), sealed.join(","))
+    format!(
+        "body_epochs=[{}] sealed=[{}]",
+        body.join(","),
+        sealed.join(",")
+    )
 }
 
 /// Per-body presence classes plus how many read back collaboratively — the
 /// split that distinguishes "imported opaque" from "readable but not
 /// collaborative" at a glance.
+#[cfg(feature = "proof")]
 fn body_report(replica: &replica::Replica) -> String {
     let keys = replica.body_keys();
     let mut opaque = 0usize;
@@ -817,7 +840,10 @@ fn body_report(replica: &replica::Replica) -> String {
             collab_ok += 1;
         }
     }
-    format!("bodies={} opaque={opaque} collab_ok={collab_ok}", keys.len())
+    format!(
+        "bodies={} opaque={opaque} collab_ok={collab_ok}",
+        keys.len()
+    )
 }
 
 /// Stand the whole engine up in the Worker: compile the runner once, instantiate
@@ -892,11 +918,15 @@ pub async fn boot(
     let responder = pulled.responder.clone();
     let space = pulled.space.clone();
 
+    // Cloned only where the proof's restore needs to declare the same schema
+    // set later; the shipped build hands the registry straight over.
+    #[cfg(feature = "proof")]
+    let kept_registry = registry.clone();
     let station = runtime::browser::Station::compose(
         pulled.space.clone(),
         pulled.replica,
         Arc::new(authority_view),
-        registry.clone(),
+        registry,
         Epoch::from_u64(1),
     )
     .map_err(|e| js_err("the browser Station does not compose", format!("{e:?}")))?;
@@ -953,7 +983,8 @@ pub async fn boot(
         sessions: RefCell::new(crate::session::SessionHost::default()),
         live,
         world_id,
-        registry,
+        #[cfg(feature = "proof")]
+        registry: kept_registry,
         mount,
     })
 }

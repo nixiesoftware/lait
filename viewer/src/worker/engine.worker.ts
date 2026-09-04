@@ -100,6 +100,10 @@ scope.addEventListener(
     const data = event.data as { type?: string } | null;
     if (!data || data.type !== "boot") return;
     stand(data as BootMessage).catch((error: unknown) => {
+      // Say it out loud as well as posting it: the host resolves and rejects
+      // through the same `render` callback, so a swallowed rejection is the
+      // difference between a diagnosable failure and a blank tab.
+      console.error("[lait] the in-tab engine failed to boot:", error);
       scope.postMessage({ type: "boot-failed", error: String(error) });
     });
   },

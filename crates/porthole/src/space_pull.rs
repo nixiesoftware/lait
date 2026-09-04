@@ -32,6 +32,22 @@ use mechanics::space::{Authority, Effect, Genesis};
 use mechanics::station::Key;
 use replica::Replica;
 
+/// How long a returning device keeps trying to reach a peer before it gives up
+/// and serves what it already holds. Short, because it has something to show and
+/// the pull will be retried by the live plane anyway; long enough that one
+/// dropped dial on a residential network does not read as "offline".
+const OFFLINE_GRACE: n0_future::time::Duration = n0_future::time::Duration::from_secs(8);
+
+/// The tab's one line to the console. porthole otherwise says nothing at all,
+/// which is survivable for a probe and not for an engine somebody's browser is
+/// running: when a person reports "it just sat there", this is the difference
+/// between a diagnosis and a guess.
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(message: &str);
+}
+
 /// Decode a 64-char hex seed the harness minted.
 pub fn unhex32(hex: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
@@ -41,11 +57,41 @@ pub fn unhex32(hex: &str) -> [u8; 32] {
     out
 }
 
-fn unique_dir(tag: &str) -> String {
-    let mut noise = [0u8; 8];
-    let _ = getrandom03::fill(&mut noise);
-    let hex: String = noise.iter().map(|b| format!("{b:02x}")).collect();
+/// The OPFS directory this device keeps a Space's store in — stable across
+/// reloads, and distinct per (Space, device).
+///
+/// Stable is the whole point: a random directory per boot meant every page load
+/// re-pulled the entire Space from a live peer and abandoned the previous copy
+/// in OPFS, so storage grew without bound across visits and nothing worked
+/// without a peer up. Keyed by the device too, because two identities sharing
+/// one browser profile must not share one store.
+///
+/// The name is a digest, not the ids themselves: a Space id in a directory name
+/// would put the Space a person visits into a filesystem path that other origins
+/// cannot read but local tooling and backups can.
+fn space_dir(tag: &str, space: &SpaceId, seed: &[u8; 32]) -> String {
+    let device = mechanics::actor::device_from_seed(seed);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lait/porthole/store/1");
+    hasher.update(space.as_str().as_bytes());
+    hasher.update(device.as_str().as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.as_bytes()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     format!("space-{tag}-{hex}")
+}
+
+/// Does this medium already hold a store, or is it a first visit? An empty
+/// medium has no slots. Asked rather than inferred from a failed open, because
+/// "the ledger is corrupt" and "there is no ledger yet" must not take the same
+/// branch — one of them would silently discard a store the person still has.
+fn is_empty(medium: &Arc<dyn journal::Medium>) -> bool {
+    medium
+        .slot_names()
+        .map(|names| names.is_empty())
+        .unwrap_or(false)
 }
 
 /// Everything the pull stood up and everything a caller needs to go further:
@@ -54,7 +100,12 @@ pub struct PulledSpace {
     pub space: SpaceId,
     pub authority: SharedLedgerAuthority,
     pub replica: Replica,
-    pub outcome: Outcome,
+    /// The completed pull, or `None` when no peer could be reached this load
+    /// and the Space was served from what this device already holds. An
+    /// absence, never a zeroed `Outcome`: "nothing moved because the peer had
+    /// nothing new" and "nothing moved because no peer answered" are different
+    /// facts, and only one of them is worth telling somebody about.
+    pub outcome: Option<Outcome>,
     /// The live transport, kept so a caller can re-pull after the Replica has
     /// been composed into a Station (which takes it by value) — the seam a
     /// live re-pull installs new material through.
@@ -217,11 +268,25 @@ pub async fn pull_space(
         recovery_root: coordinates.payload.recovery_root,
     };
 
-    // The member device's whole world, on real browser storage.
-    let ledger_medium = journal::OpfsMedium::open(&unique_dir("ledger"))
-        .await
-        .expect("opfs");
-    let mut ledger = Authority::create_on(Arc::new(ledger_medium), genesis).expect("fresh ledger");
+    // The member device's whole world, on real browser storage — reopened if
+    // this device has been here before, so a reload converges over what it
+    // already holds instead of re-pulling the Space from scratch.
+    let ledger_medium: Arc<dyn journal::Medium> = Arc::new(
+        journal::OpfsMedium::open(&space_dir("ledger", &space, &seed))
+            .await
+            .expect("opfs"),
+    );
+    // Whether this device has been in this Space before, on this browser
+    // profile. It decides one thing: whether an unreachable peer is a boot
+    // failure (a first visit has nothing to serve) or a staleness condition.
+    let resumed = !is_empty(&ledger_medium);
+    let mut ledger = if resumed {
+        Authority::open_on(ledger_medium).expect("the ledger this device already holds reopens")
+    } else {
+        Authority::create_on(ledger_medium, genesis).expect("fresh ledger")
+    };
+    // Idempotent on reopen: an exact replay of an already-committed batch
+    // returns the original receipt without a new journal write.
     ledger
         .commit_batch(&[Effect::Actor(founder_inception).encode()], &[])
         .expect("founder inception lands");
@@ -233,11 +298,13 @@ pub async fn pull_space(
             stash_admission_request(&authority, &coordinates, admission, &seed, &space);
         }
     }
-    let replica_medium = journal::OpfsMedium::open(&unique_dir("replica"))
+    // `open_on` is already open-or-create, so the stable name is the whole
+    // change here: an existing store recovers, a first visit starts empty.
+    let replica_medium = journal::OpfsMedium::open(&space_dir("replica", &space, &seed))
         .await
         .expect("opfs");
     let mut replica = Replica::open_on(Arc::new(replica_medium), Arc::new(authority.clone()))
-        .expect("fresh replica");
+        .expect("the replica this device already holds reopens");
     configure(&mut replica);
 
     // The transport, exactly as the live claim proved it: relay-only,
@@ -261,7 +328,25 @@ pub async fn pull_space(
     // exactly the old behavior. A FAILED pull is "could not be asked", never
     // "refused" — a browser join rides a residential network, so a transient
     // dial failure retries until the deadline instead of killing the enter.
-    let deadline = n0_future::time::Instant::now() + n0_future::time::Duration::from_secs(60);
+    //
+    // How long it waits depends on whether it has an alternative. The default
+    // budget — 120s whole, 20s per step — is right for a first visit, which has
+    // nothing else to show. For a device already holding this Space it is far
+    // too long, and bounding it is what makes the fallback below reachable at
+    // all: the fallback runs on a FAILED pull, so a pull that takes two minutes
+    // to fail is a two-minute blank tab. Measured against an unreachable relay,
+    // the dial reports `Unreachable` at exactly this bound.
+    let serve_local_if_unreachable = resumed && admitted(&authority);
+    let deadlines = if serve_local_if_unreachable {
+        Deadlines {
+            whole: OFFLINE_GRACE,
+            progress: OFFLINE_GRACE,
+        }
+    } else {
+        Deadlines::default()
+    };
+    let started = n0_future::time::Instant::now();
+    let deadline = started + n0_future::time::Duration::from_secs(60);
     let outcome = loop {
         let reverse = admission_push(&authority);
         let awaiting = reverse.is_some();
@@ -273,13 +358,13 @@ pub async fn pull_space(
             &authority.bundle(),
             &mut replica,
             reverse,
-            Deadlines::default(),
+            deadlines,
         )
         .await
         {
             Ok(outcome) => {
                 if !awaiting || admitted(&authority) {
-                    break outcome;
+                    break Some(outcome);
                 }
                 // The two terminal absences are different facts and say so:
                 // the peer ANSWERED but no admin has redeemed the request.
@@ -289,8 +374,27 @@ pub async fn pull_space(
                 );
             }
             Err(failure) => {
+                // A device that has been admitted and still holds its store does
+                // not need the peer to be up to serve the Space it already has.
+                // An unreachable network is then a staleness condition, not a
+                // boot failure — the alternative is a person who opened this
+                // Space yesterday getting a dead tab today because somebody
+                // else's laptop is closed.
+                //
+                // It still prefers the peer: the attempt above was bounded by
+                // `OFFLINE_GRACE` rather than skipped, so reaching here means a
+                // dial genuinely went unanswered for that long. A first visit
+                // has nothing to fall back to and keeps the full deadline.
+                if serve_local_if_unreachable {
+                    console_log(&format!(
+                        "[lait] no peer answered ({failure:?}); serving the Space this device \
+                         already holds"
+                    ));
+                    break None;
+                }
+                let now = n0_future::time::Instant::now();
                 assert!(
-                    n0_future::time::Instant::now() < deadline,
+                    now < deadline,
                     "the Space could not be pulled within the deadline: {failure:?}"
                 );
             }

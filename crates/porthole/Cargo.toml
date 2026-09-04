@@ -27,6 +27,15 @@ publish = false
 edition = "2021"
 rust-version = "1.92"
 
+[features]
+# The R1 snapshot round-trip proof (`verify_snapshot_roundtrip`), exported to
+# JS. OFF by default, because it is a claim about the engine and not a thing the
+# product does: it captures the whole Space and restores a SECOND copy in
+# memory, so on a real Space calling it costs ~2x the Space in a tab's heap.
+# The harness that drives the proof builds with it; the shipped module does not
+# carry it. `capture`/`snapshot` — the real durability path — stay ungated.
+proof = []
+
 [lib]
 # `cdylib` is what wasm-pack links into the shippable module; `rlib` lets
 # `wasm-probe` depend on this crate and re-export its modules for the browser

@@ -48,7 +48,11 @@ async fn a_browser_tab_enters_a_real_space_from_the_invite_alone() {
         .expect("a count");
 
     let mut pulled = pull_space(relay, seed, ticket, |_| {}).await;
-    assert!(pulled.outcome.bytes_moved > 0, "material moved");
+    let outcome = pulled
+        .outcome
+        .as_ref()
+        .expect("a first visit pulls from the peer, never from a store it does not have");
+    assert!(outcome.bytes_moved > 0, "material moved");
 
     // The enter resolved: the founder redeemed the pushed request, the pulled
     // ledger admits this device, the keyring can unseal, the replica holds

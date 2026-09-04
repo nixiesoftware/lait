@@ -94,7 +94,11 @@ async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
         runtime::browser::declare_schemas(replica, &registry);
     })
     .await;
-    assert!(pulled.outcome.bytes_moved > 0, "material moved");
+    let outcome = pulled
+        .outcome
+        .as_ref()
+        .expect("a first visit pulls from the peer, never from a store it does not have");
+    assert!(outcome.bytes_moved > 0, "material moved");
 
     // Resolve the caller's actor/device from the pulled ledger before it moves
     // into the composed Station.

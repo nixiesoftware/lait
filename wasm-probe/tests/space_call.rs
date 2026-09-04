@@ -94,7 +94,11 @@ async fn the_engine_in_a_tab_reads_and_writes_a_pulled_space() {
         runtime::browser::declare_schemas(replica, &registry);
     })
     .await;
-    assert!(pulled.outcome.bytes_moved > 0, "material moved");
+    let outcome = pulled
+        .outcome
+        .as_ref()
+        .expect("a first visit pulls from the peer, never from a store it does not have");
+    assert!(outcome.bytes_moved > 0, "material moved");
 
     // The engine over the pulled Space: the pulled ledger IS the authority.
     let authority = runtime::browser::LedgerAuthorityView(pulled.authority.clone());
