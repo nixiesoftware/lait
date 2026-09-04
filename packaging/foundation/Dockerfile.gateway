@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+#
+# The snapshot write gateway (`lait-snapshot-gateway`): the conditional write in
+# front of the daemon-less hosting bucket. A member's browser tab PUTs its
+# captured Space snapshot here; the gateway authorizes the write against the
+# Space's own signed ledger (holding no key, reading no plaintext) and writes it
+# to GCS under an `ifGenerationMatch` precondition, so two racing writers get a
+# 412-and-retry rather than a lost update. Built by this repository (the wire and
+# the authority live here), deployed by NixieSoftware/foundation which owns where
+# and how it runs. Cloud Build builds it — no local Docker in the authoring
+# environment — so the context is whatever `.gcloudignore` admits.
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Pinned to the crate MSRV (`rust-version` in tools/snapshot-gateway/Cargo.toml).
+# The fetch stack is pure-Rust TLS (ureq/rustls); the only C need is a linker and
+# ring's perl/cc, from build-essential.
+FROM rust:1.92-slim-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config perl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The whole workspace, then one binary out of it — no stub cache-warm; the
+# single-crate trick does not survive a workspace, and Cloud Build has no layer
+# cache across submissions anyway.
+COPY . .
+RUN cargo build --release --locked -p lait-snapshot-gateway
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+# Slim runtime; ca-certificates is enough for the gateway's outbound TLS to GCS.
+# It holds no signing key — the authority is the Space's own signed ledger,
+# replayed from the blob — and its only credential is the Cloud Run service
+# account's, minted per request from the instance metadata server for the
+# storage.objects.create the conditional write needs. TLS termination is the
+# platform's (Cloud Run fronts it), so the gateway serves plain HTTP on $PORT.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 lait
+
+COPY --from=build /src/target/release/lait-snapshot-gateway /usr/local/bin/lait-snapshot-gateway
+
+# An image is a distribution like any other: whoever receives it gets the terms
+# and the account of what it is built from.
+COPY LICENSE /usr/share/doc/lait/LICENSE
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/lait/THIRD-PARTY-NOTICES.md
+
+USER lait
+EXPOSE 8080
+
+# No args baked in: Cloud Run passes the port in $PORT and the target bucket in
+# $GATEWAY_BUCKET. Running with neither exits with a message rather than
+# guessing — a bucket is never a default.
+ENTRYPOINT ["lait-snapshot-gateway"]

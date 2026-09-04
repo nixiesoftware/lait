@@ -147,11 +147,20 @@ mod tests {
     /// no bucket. A put at the wrong generation conflicts; a successful put
     /// bumps the generation, exactly as GCS's `ifGenerationMatch` does.
     #[derive(Default)]
-    struct MemStore(Mutex<HashMap<String, Stored>>);
+    struct MemStore {
+        objects: Mutex<HashMap<String, Stored>>,
+        // A monotonic generation source that is deliberately NOT `current + 1`.
+        // Real GCS generations are large, non-sequential timestamps, and a test
+        // that could predict the next generation would encode an assumption a
+        // real client must never make: the client READS the current generation
+        // and signs against it, it does not compute it. Prod caught exactly
+        // this once; this counter keeps it caught.
+        next: Mutex<u64>,
+    }
 
     impl ObjectStore for MemStore {
         fn read(&self, key: &str) -> Result<Option<Stored>, String> {
-            Ok(self.0.lock().unwrap().get(key).cloned())
+            Ok(self.objects.lock().unwrap().get(key).cloned())
         }
         fn put_if_generation(
             &self,
@@ -159,12 +168,14 @@ mod tests {
             bytes: &[u8],
             expected_generation: u64,
         ) -> Result<u64, PutError> {
-            let mut map = self.0.lock().unwrap();
+            let mut map = self.objects.lock().unwrap();
             let current = map.get(key).map(|s| s.generation).unwrap_or(0);
             if current != expected_generation {
                 return Err(PutError::Conflict { current });
             }
-            let generation = current + 1;
+            let mut next = self.next.lock().unwrap();
+            *next = if *next == 0 { 1_700_000_000_000 } else { *next } + 98_777;
+            let generation = *next;
             map.insert(
                 key.to_string(),
                 Stored {
@@ -257,18 +268,26 @@ mod tests {
         .encode()
     }
 
+    /// The current generation a client would read before signing its next
+    /// write — the ONLY way to know it, since generations are not predictable.
+    fn current_generation(store: &MemStore, key: &str) -> u64 {
+        store.read(key).unwrap().map(|s| s.generation).unwrap_or(0)
+    }
+
     #[test]
-    fn the_founders_first_write_creates_generation_one() {
+    fn the_founders_first_write_creates_the_object() {
         let founder = [3u8; 32];
         let (blob, space) = mint_space(founder, &[]);
         let store = MemStore::default();
         let key = "spaces/cap.snap";
         let outcome = apply_write(&store, key, &space, &envelope(&founder, &space, 0, &blob));
-        assert!(
-            matches!(outcome, WriteOutcome::Accepted { generation: 1 }),
-            "{outcome:?}"
-        );
-        assert_eq!(store.read(key).unwrap().unwrap().generation, 1);
+        let generation = match outcome {
+            WriteOutcome::Accepted { generation } => generation,
+            other => panic!("{other:?}"),
+        };
+        // The object now exists at exactly the generation the write reported —
+        // whatever it is; the client learns it from this answer, never predicts.
+        assert_eq!(current_generation(&store, key), generation);
     }
 
     #[test]
@@ -277,13 +296,15 @@ mod tests {
         let (blob, space) = mint_space(founder, &[]);
         let store = MemStore::default();
         let key = "spaces/cap.snap";
-        // First write lands (gen 0 -> 1).
+        // First write lands; the object is now at some generation.
         apply_write(&store, key, &space, &envelope(&founder, &space, 0, &blob));
+        let landed = current_generation(&store, key);
         // A second write that still thinks it is replacing gen 0 conflicts, and
-        // is told the generation actually there.
+        // is told the generation actually there — the number it must re-sign
+        // against, which it could not have guessed.
         let outcome = apply_write(&store, key, &space, &envelope(&founder, &space, 0, &blob));
         assert!(
-            matches!(outcome, WriteOutcome::Conflict { current: 1 }),
+            matches!(outcome, WriteOutcome::Conflict { current } if current == landed),
             "{outcome:?}"
         );
     }
@@ -295,11 +316,23 @@ mod tests {
         let store = MemStore::default();
         let key = "spaces/cap.snap";
         apply_write(&store, key, &space, &envelope(&founder, &space, 0, &blob));
-        // The retry re-reads (gen 1) and re-signs against it.
-        let outcome = apply_write(&store, key, &space, &envelope(&founder, &space, 1, &blob));
+        // The retry re-READS the current generation and re-signs against it —
+        // the read-merge-write contract, not a predicted `current + 1`.
+        let current = current_generation(&store, key);
+        let outcome = apply_write(
+            &store,
+            key,
+            &space,
+            &envelope(&founder, &space, current, &blob),
+        );
         assert!(
-            matches!(outcome, WriteOutcome::Accepted { generation: 2 }),
+            matches!(outcome, WriteOutcome::Accepted { .. }),
             "{outcome:?}"
+        );
+        assert_ne!(
+            current_generation(&store, key),
+            current,
+            "the write advanced it"
         );
     }
 
@@ -311,11 +344,18 @@ mod tests {
         let store = MemStore::default();
         let key = "spaces/cap.snap";
         apply_write(&store, key, &space, &envelope(&founder, &space, 0, &blob));
-        // The stranger reads gen 1 honestly (no conflict) but cannot write it.
-        let outcome = apply_write(&store, key, &space, &envelope(&stranger, &space, 1, &blob));
+        let current = current_generation(&store, key);
+        // The stranger reads the current generation honestly (no conflict) but
+        // cannot write it.
+        let outcome = apply_write(
+            &store,
+            key,
+            &space,
+            &envelope(&stranger, &space, current, &blob),
+        );
         assert!(matches!(outcome, WriteOutcome::Denied(_)), "{outcome:?}");
         // And the object is unchanged.
-        assert_eq!(store.read(key).unwrap().unwrap().generation, 1);
+        assert_eq!(current_generation(&store, key), current);
     }
 
     #[test]
