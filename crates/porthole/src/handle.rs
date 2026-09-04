@@ -641,6 +641,58 @@ impl BrowserEngineHandle {
         Ok(snapshot.encode())
     }
 
+    /// The bucket object key this Space's snapshot lives at — a capability
+    /// digest of the Space id, not the id itself (see
+    /// [`contact::gateway::object_key`]). The Worker fetches `GET <bucket>/<key>`
+    /// to bootstrap and derives the gateway path `PUT <gateway>/s/<basename>`
+    /// from it, so nothing but the tab that already holds the Space id can
+    /// locate its blob.
+    #[wasm_bindgen(js_name = objectKey)]
+    pub fn object_key(&self) -> String {
+        contact::gateway::object_key(&self.space)
+    }
+
+    /// Capture the live Space and sign a write of it that replaces
+    /// `expected_generation` — the publish half of the bucket loop. Returns the
+    /// encoded [`contact::gateway::WriteEnvelope`] the Worker PUTs to the
+    /// gateway. On a `412` the Worker re-reads the current generation and calls
+    /// this again with it: the signature binds the generation, so a stale
+    /// envelope cannot be replayed against a moved object.
+    ///
+    /// `expected_generation` is `0` for the very first publish (the object must
+    /// not yet exist) and otherwise the generation the tab last saw — never a
+    /// predicted one, because GCS generations are not sequential.
+    #[wasm_bindgen(js_name = publishEnvelope)]
+    pub fn publish_envelope(&self, expected_generation: u64) -> Result<Vec<u8>, JsValue> {
+        let blob = self.snapshot()?;
+        let request =
+            contact::gateway::sign_write(&self.seed, &self.space, expected_generation, &blob);
+        Ok(contact::gateway::WriteEnvelope { request, blob }.encode())
+    }
+
+    /// Absorb a snapshot the Worker downloaded from the bucket into the LIVE
+    /// Space — the bootstrap/catch-up half. Idempotent and order-independent
+    /// (see [`contact::snapshot::converge`]): absorbing an older or already-held
+    /// blob changes nothing, absorbing a newer one merges it. Returns whether
+    /// the replica frontier advanced, so the Worker can tell "the bucket had
+    /// something new" from "the bucket was behind us".
+    #[wasm_bindgen(js_name = absorbSnapshot)]
+    pub fn absorb_snapshot(&self, snapshot_bytes: &[u8]) -> Result<bool, JsValue> {
+        let snapshot = contact::snapshot::SpaceSnapshot::decode(snapshot_bytes)
+            .map_err(|f| js_err("decode bucket snapshot", format!("{f:?}")))?;
+        let outcome = self
+            .station
+            .with_replica_convergence(|replica| {
+                contact::snapshot::converge(snapshot, &self.seed, replica, &self.authority).map_err(
+                    |f| {
+                        replica::transaction::commit::Failure::Illegitimate(format!("{f:?}").into())
+                    },
+                )
+            })
+            .map_err(|e| js_err("absorb bucket snapshot", format!("{e:?}")))?;
+        Ok(outcome.advanced())
+    }
+
     /// Prove the daemon-less round trip end to end (adversary R1): capture the
     /// live Space, cold-restore it into fresh in-memory storage with this
     /// device's seed, and DECRYPT every collaborative body on the restored
@@ -657,6 +709,47 @@ impl BrowserEngineHandle {
     /// the restored keyring, and 25 bodies opaque anyway. What was actually
     /// missing was the schema declaration on the restored Replica. Keep the
     /// geometry: it is what separates "cannot decrypt" from "did not classify".
+    /// Restore a snapshot the Worker downloaded from the bucket into FRESH
+    /// in-memory storage and count how many collaborative bodies decrypt — the
+    /// read half of the bucket acceptance proof (slice 4). The harness publishes
+    /// this tab's Space through the real gateway, GETs the bytes back from the
+    /// real bucket, and hands them here: a non-zero count matching the live
+    /// Space is the whole write → gateway → bucket → read → decrypt path closing
+    /// on infrastructure, not in memory.
+    #[cfg(feature = "proof")]
+    pub fn bootstrap_and_count(&self, snapshot_bytes: &[u8]) -> Result<String, JsValue> {
+        let snapshot = contact::snapshot::SpaceSnapshot::decode(snapshot_bytes)
+            .map_err(|f| js_err("decode downloaded snapshot", format!("{f:?}")))?;
+        let (restored, _authority) = contact::snapshot::restore(
+            snapshot,
+            self.seed,
+            std::sync::Arc::new(journal::MemMedium::new()),
+            std::sync::Arc::new(journal::MemMedium::new()),
+            |replica| runtime::browser::declare_schemas(replica, &self.registry),
+        )
+        .map_err(|f| js_err("restore downloaded snapshot", format!("{f:?}")))?;
+        let live = self
+            .station
+            .with_replica_read(|replica| Ok(count_decrypted(replica)))
+            .map_err(|e| js_err("read live replica", format!("{e:?}")))?;
+        let restored_keys = restored.body_keys().len();
+        let restored_decrypted = count_decrypted(&restored);
+        if restored_decrypted != live || restored_decrypted == 0 {
+            return Err(js_err(
+                "bucket round trip",
+                format!(
+                    "downloaded snapshot decrypted {restored_decrypted} of {restored_keys}, live \
+                     decrypts {live} — {}",
+                    body_report(&restored)
+                ),
+            ));
+        }
+        Ok(format!(
+            "downloaded from the bucket: {restored_decrypted}/{restored_keys} bodies decrypted, \
+             matching the live Space"
+        ))
+    }
+
     #[cfg(feature = "proof")]
     pub fn verify_snapshot_roundtrip(&self) -> Result<String, JsValue> {
         let bytes = self.snapshot()?;
