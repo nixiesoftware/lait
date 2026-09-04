@@ -94,6 +94,25 @@ export const DEFAULT_ROUTE: ViewerRoute = {
   issue: null,
 };
 
+/**
+ * The surface's base path — `""` at the apex, `"/i"` under the foundation join
+ * surface (Vite's `BASE_URL`, trimmed of its trailing slash). The canonical
+ * grammar is authored base-relative and this is applied at the edges, so the
+ * whole address stays under the surface: a bare `foundation.pub/i` founder's
+ * navigation lands at `foundation.pub/i/spaces/…`, never at the apex
+ * `foundation.pub/spaces/…` (a different origin's app, where the founder's Space
+ * is not on the device — the "not on this device" dead end).
+ */
+export const SURFACE_BASE = (import.meta.env.BASE_URL ?? "/").replace(/\/+$/, "");
+
+/** Strip the surface base so the canonical grammar parses the same everywhere. */
+function stripBase(pathname: string): string {
+  if (SURFACE_BASE && (pathname === SURFACE_BASE || pathname.startsWith(`${SURFACE_BASE}/`))) {
+    return pathname.slice(SURFACE_BASE.length) || "/";
+  }
+  return pathname;
+}
+
 const VIEWS = new Set<View>([
   "overview",
   "list",
@@ -121,7 +140,7 @@ const LAST_ROUTE = "lait.last-route";
  * the route is a small product contract, not a bag of component state.
  */
 export function parseRoute(location: Pick<Location, "pathname" | "search">): ViewerRoute {
-  const parts = location.pathname.split("/").filter(Boolean).map(decode);
+  const parts = stripBase(location.pathname).split("/").filter(Boolean).map(decode);
   if (parts[0] !== "spaces" || !parts[1]) return DEFAULT_ROUTE;
 
   const candidate = parts[2];
@@ -182,7 +201,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
 }
 
 export function formatRoute(route: ViewerRoute): string {
-  if (!route.spaceId) return "/";
+  if (!route.spaceId) return SURFACE_BASE || "/";
 
   const query = new URLSearchParams();
   // Not while composing: the draft page stands in front of the rows, so an
@@ -222,8 +241,9 @@ export function formatRoute(route: ViewerRoute): string {
     : underTeam
       ? `/spaces/${encodeURIComponent(route.spaceId)}/teams/${encodeURIComponent(route.team!)}/${projectSegment(route.view)}`
       : `/spaces/${encodeURIComponent(route.spaceId)}/${route.view}`;
+  const based = SURFACE_BASE ? `${SURFACE_BASE}${path}` : path;
   const search = query.toString();
-  return search ? `${path}?${search}` : path;
+  return search ? `${based}?${search}` : based;
 }
 
 export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {

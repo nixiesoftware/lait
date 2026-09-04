@@ -33,6 +33,7 @@ import {
   parseRoute,
   resolveLocalSpace,
   saveLastRoute,
+  SURFACE_BASE,
   type ViewerRoute,
 } from "./core/route";
 import { leave, push, replace } from "./core/history";
@@ -203,6 +204,11 @@ export function App() {
   const initialRoute = useRef((() => {
     const fromUrl = parseRoute(window.location);
     if (fromUrl.spaceId) return fromUrl;
+    // The join surface (`/i`) founds/resumes its OWN local Space, and the
+    // last-route memo is shared with the apex origin — honoring it here would
+    // seed a canonical `ws_…` this device does not hold, which is the "not on
+    // this device" dead end. Let the Space resolve locally instead.
+    if (SURFACE_BASE) return fromUrl;
     const last = loadLastRoute();
     if (!last) return fromUrl;
     // A chosen home view overrides where you left off — but only on launch,
