@@ -31,6 +31,19 @@ export interface JoinParams {
 export const FOUNDATION_RELAY = "https://relay.foundation.pub";
 
 /**
+ * The daemon-less durability plane: the write gateway a tab publishes its Space
+ * snapshot through, and the public bucket base it reads one back from. Wired
+ * ONLY for a foundation-relay join (a real production join); a dev/local join
+ * carries its own `&relay=` and gets no bucket sync, so an e2e stack never
+ * publishes its throwaway Space to the production bucket. The gateway path is
+ * `PUT <gateway>/s/<capability>` and the read is `GET <bucket>/spaces/<cap>`.
+ */
+export const FOUNDATION_GATEWAY =
+  "https://foundation-snapshot-gateway-894246603476.us-central1.run.app";
+export const FOUNDATION_SNAPSHOTS =
+  "https://storage.googleapis.com/the-foundation-snapshots";
+
+/**
  * Parse a join link from a URL fragment: `#join=<ticket>` (with an optional
  * `&relay=<url>`). Returns `null` for an ordinary load (no ticket), which keeps
  * the head topology. When the ticket is present but no relay is given, the
@@ -88,11 +101,18 @@ export function bootstrapEngine(loc: Location = self.location): Promise<void> {
         reject(new Error(data.error ?? "the in-tab engine failed to boot"));
       }
     });
+    // Bucket durability rides only a real foundation-relay join; a dev join
+    // (its own &relay=) leaves these unset and the Worker skips bucket sync.
+    const bucket =
+      join.relay === FOUNDATION_RELAY
+        ? { gatewayBase: FOUNDATION_GATEWAY, bucketBase: FOUNDATION_SNAPSHOTS }
+        : {};
     worker.postMessage({
       type: "boot",
       relay: join.relay,
       ticket: join.ticket,
       ...ISSUES,
+      ...bucket,
     });
   });
 }

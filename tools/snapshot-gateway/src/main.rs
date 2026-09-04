@@ -24,6 +24,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
 use lait_snapshot_gateway::{apply_write, read_snapshot, Gateway, ObjectStore, WriteOutcome};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::gcs::{metadata_token, GcsStore};
 
@@ -73,9 +74,19 @@ async fn main() -> Result<()> {
     let store: Arc<dyn ObjectStore> = Arc::new(GcsStore::new(bucket.clone(), metadata_token));
     let gateway = Arc::new(Gateway { store });
 
+    // The tab reads and writes from another origin. Authority is the signed
+    // envelope, never the origin, so the allow-list is open: CORS gates which
+    // page may READ the response in a browser, and nothing here trusts it for
+    // anything. A forged write still fails `authorize_write`; a cross-origin
+    // read is already public at the bucket.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     let app = Router::new()
         .route("/s/{key}", get(handle_get).put(handle_put))
         .route("/healthz", get(|| async { "ok" }))
+        .layer(cors)
         .with_state(gateway);
 
     tracing::info!(%http, %bucket, "snapshot gateway up");

@@ -24,6 +24,10 @@ contact = { path = "../../crates/contact" }
 mechanics = { path = "../../crates/mechanics" }
 anyhow = "1"
 axum = "0.8"
+# The browser PUTs cross-origin (foundation.pub → this Cloud Run service), so a
+# non-simple request preflights; CorsLayer answers the OPTIONS and stamps the
+# allow headers.
+tower-http = { version = "0.6", features = ["cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync", "io-util"] }

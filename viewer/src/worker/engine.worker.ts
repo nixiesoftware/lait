@@ -36,6 +36,84 @@ interface BootMessage {
   version: string;
   release: string;
   mount: string;
+  /** The write gateway and public bucket base for daemon-less durability. Set
+   *  only on a real foundation-relay join (see bootstrap.ts); absent for a dev
+   *  join, which skips bucket sync entirely. */
+  gatewayBase?: string;
+  bucketBase?: string;
+}
+
+/** The engine methods the bucket-sync loop drives, past the boot handle's
+ *  TypeScript surface (the wasm-bindgen glue is untyped here). */
+interface BucketHandle {
+  objectKey(): string;
+  publishEnvelope(expectedGeneration: bigint): Uint8Array;
+  absorbSnapshot(bytes: Uint8Array): boolean;
+}
+
+/**
+ * Daemon-less durability, in the background: catch up to the bucket at boot,
+ * then keep it current. Best-effort throughout — every failure degrades to
+ * "try again next tick", never a surfaced error, because the live pull already
+ * gave the tab a working Space and the bucket is the durability layer beneath
+ * it, not the thing the tab depends on to function.
+ *
+ * The generation is never predicted: the first publish tries `0` (create), and
+ * a `412` hands back the current generation to re-sign against — the
+ * read-merge-write retry, exactly as two racing writers resolve it.
+ */
+function runBucketSync(handle: BucketHandle, gatewayBase: string, bucketBase: string): void {
+  const key = handle.objectKey();
+  const basename = key.replace(/^spaces\//, "");
+  const getUrl = `${bucketBase}/${key}`;
+  const putUrl = `${gatewayBase}/s/${basename}`;
+  let lastGeneration = 0n;
+
+  const bootstrap = async () => {
+    try {
+      const got = await fetch(getUrl, { cache: "no-store" });
+      if (got.ok) {
+        const advanced = handle.absorbSnapshot(new Uint8Array(await got.arrayBuffer()));
+        console.log(`[lait] bucket bootstrap: ${advanced ? "caught up" : "already current"}`);
+      }
+    } catch (error) {
+      console.warn("[lait] bucket bootstrap skipped:", error);
+    }
+  };
+
+  const putEnvelope = async (generation: bigint): Promise<Response> => {
+    // Copy into a plain ArrayBuffer: the wasm view is backed by the shared
+    // engine memory, which is not an accepted fetch body.
+    const envelope = handle.publishEnvelope(generation);
+    const body = new Uint8Array(envelope).slice().buffer;
+    return fetch(putUrl, {
+      method: "PUT",
+      body,
+      headers: { "content-type": "application/octet-stream" },
+    });
+  };
+
+  const publish = async () => {
+    try {
+      let response = await putEnvelope(lastGeneration);
+      if (response.status === 412) {
+        // The generation moved under us; re-sign against the one it reports.
+        const current = BigInt((await response.json()).current);
+        response = await putEnvelope(current);
+      }
+      if (response.ok) {
+        lastGeneration = BigInt((await response.json()).generation);
+      }
+    } catch (error) {
+      // Leave lastGeneration; the next tick retries against it or re-reads.
+      console.warn("[lait] bucket publish deferred:", error);
+    }
+  };
+
+  void bootstrap().then(publish);
+  // A modest heartbeat: a write is durable within the interval without a
+  // convergence hook to publish on. Tighten to publish-on-change later.
+  setInterval(() => void publish(), 60_000);
 }
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -91,6 +169,15 @@ async function stand(message: BootMessage): Promise<void> {
   );
   engineRouter(handle, scope);
   scope.postMessage({ type: "ready" });
+
+  // Daemon-less durability, only on a real foundation join (both set together).
+  if (message.gatewayBase && message.bucketBase) {
+    runBucketSync(
+      handle as unknown as BucketHandle,
+      message.gatewayBase,
+      message.bucketBase,
+    );
+  }
 }
 
 // The boot handshake runs once; after it, `engineRouter` owns `message`s.
