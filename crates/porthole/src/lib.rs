@@ -20,3 +20,14 @@ pub mod live_client;
 pub mod runner;
 pub mod session;
 pub mod space_pull;
+
+/// Installed once at module load, before any `boot`/`found` runs: a Rust panic
+/// then surfaces as a console error carrying its message and source location,
+/// instead of the bare `RuntimeError: unreachable` the wasm abort otherwise
+/// shows (which names nothing and cannot be traced from a user's report). The
+/// hook only formats the panic — it changes no behaviour and the process still
+/// unwinds to the same abort.
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn __install_panic_hook() {
+    console_error_panic_hook::set_once();
+}

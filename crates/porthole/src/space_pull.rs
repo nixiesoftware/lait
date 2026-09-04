@@ -430,6 +430,14 @@ pub async fn pull_space(
 /// Space here — enough for a person founding from a browser; multi-Space
 /// founding is a later, larger choice.
 #[allow(clippy::too_many_arguments)]
+/// A device holds a local store for this Space, but THIS build cannot reopen
+/// it — an older build wrote a format this one does not read. Returned instead
+/// of panicking so the caller can recover ([`recover_space`]) rather than wedge
+/// every visit on an unactionable `unreachable`. Distinct from "there is no
+/// store yet" (a first visit), which founds normally.
+#[derive(Debug)]
+pub struct ResumeIncompatible;
+
 pub async fn found_space(
     relay: &str,
     seed: [u8; 32],
@@ -438,7 +446,7 @@ pub async fn found_space(
     implementation_version: u32,
     founder_grants: Vec<contact::founding::FounderGrant>,
     configure: impl FnOnce(&mut Replica),
-) -> PulledSpace {
+) -> Result<PulledSpace, ResumeIncompatible> {
     // The whole founding sequence — identity derivation and the ledger's
     // founding + activation batches — lives in `contact::founding`, native-
     // tested (founder is admin, World active, grants effective). Here it is only
@@ -456,7 +464,15 @@ pub async fn found_space(
     let ledger = if resumed {
         // A reopen recovers epoch 0 from the sealed envelope the first found
         // persisted (via `refresh_keyring` below); the founding is not re-run.
-        Authority::open_on(ledger_medium).expect("the founded ledger reopens")
+        // If the store is one THIS build cannot read (an older build wrote it),
+        // do not crash — surface it so the caller can adopt the durable bucket
+        // copy or re-found. Absence-vs-corrupt stays distinct (`is_empty`): a
+        // first visit still founds; only a failed reopen of a store that IS
+        // there takes this branch.
+        match Authority::open_on(ledger_medium) {
+            Ok(ledger) => ledger,
+            Err(_) => return Err(ResumeIncompatible),
+        }
     } else {
         let mut ledger =
             Authority::create_on(ledger_medium, identity.genesis.clone()).expect("fresh ledger");
@@ -480,13 +496,113 @@ pub async fn found_space(
     let replica_medium = journal::OpfsMedium::open(&space_dir("replica", &space, &seed))
         .await
         .expect("opfs");
-    let mut replica = Replica::open_on(Arc::new(replica_medium), Arc::new(authority.clone()))
-        .expect("the founded replica opens");
+    let mut replica = match Replica::open_on(Arc::new(replica_medium), Arc::new(authority.clone()))
+    {
+        Ok(replica) => replica,
+        // The ledger resumed but its replica did not — the same incompatibility.
+        // A fresh store's replica opening must succeed, so only a resume gets the
+        // recoverable branch; a fresh failure is a real bug and still panics.
+        Err(_) if resumed => return Err(ResumeIncompatible),
+        Err(failure) => panic!("the founded replica opens: {failure:?}"),
+    };
     configure(&mut replica);
 
-    // A relay transport so the founder is reachable and can publish; there is
-    // no responder to dial (the cloud is the meeting point), so its own key
-    // stands in the field a solo founder never uses.
+    console_log(&format!(
+        "[lait] founded Space {} (resumed={resumed})",
+        space.as_str()
+    ));
+    Ok(finish_pulled(space, authority, replica, seed, relay).await)
+}
+
+/// Recover a Space whose local store this build could not reopen
+/// ([`ResumeIncompatible`]): clear the unreadable store, then either ADOPT the
+/// durable published copy from the bucket (restore its snapshot into a fresh
+/// store — no re-founding, because the bucket carries the original epoch 0 and
+/// re-founding would mint a fresh random one that conflicts with it) or, when
+/// nothing was ever published, re-found fresh. The Space id is deterministic in
+/// the seed, so the object key is unchanged and the bucket copy still matches.
+pub async fn recover_space(
+    relay: &str,
+    seed: [u8; 32],
+    snapshot: Option<Vec<u8>>,
+    world: &str,
+    implementation_id: [u8; 32],
+    implementation_version: u32,
+    founder_grants: Vec<contact::founding::FounderGrant>,
+    configure: impl FnOnce(&mut Replica),
+) -> PulledSpace {
+    let identity = contact::founding::founding_identity(&seed);
+    let space = identity.space.clone();
+
+    // Clear the store an older build left — with no OPFS handle held on it, so
+    // the fresh open below is not refused as an exclusive-access conflict.
+    wipe_store("ledger", &space, &seed).await;
+    wipe_store("replica", &space, &seed).await;
+
+    let ledger_medium: Arc<dyn journal::Medium> = Arc::new(
+        journal::OpfsMedium::open(&space_dir("ledger", &space, &seed))
+            .await
+            .expect("opfs"),
+    );
+    let replica_medium: Arc<dyn journal::Medium> = Arc::new(
+        journal::OpfsMedium::open(&space_dir("replica", &space, &seed))
+            .await
+            .expect("opfs"),
+    );
+
+    let adopted = snapshot.is_some();
+    let (replica, authority) = match snapshot {
+        Some(bytes) => {
+            let snap = contact::snapshot::SpaceSnapshot::decode(&bytes)
+                .expect("the bucket snapshot decodes");
+            contact::snapshot::restore(snap, seed, ledger_medium, replica_medium, configure)
+                .expect("restore adopts the bucket snapshot")
+        }
+        None => {
+            let mut ledger = Authority::create_on(ledger_medium, identity.genesis.clone())
+                .expect("fresh ledger");
+            contact::founding::found_on_ledger(
+                &mut ledger,
+                &seed,
+                &identity,
+                world,
+                implementation_id,
+                implementation_version,
+                &founder_grants,
+            )
+            .expect("founding commits");
+            let authority =
+                SharedLedgerAuthority::new(LedgerAuthority::new(space.clone(), ledger, seed));
+            let mut replica = Replica::open_on(replica_medium, Arc::new(authority.clone()))
+                .expect("the re-founded replica opens");
+            configure(&mut replica);
+            (replica, authority)
+        }
+    };
+
+    console_log(&format!(
+        "[lait] recovered Space {} ({})",
+        space.as_str(),
+        if adopted {
+            "adopted the bucket copy"
+        } else {
+            "re-founded"
+        }
+    ));
+    finish_pulled(space, authority, replica, seed, relay).await
+}
+
+/// The transport + `PulledSpace` tail shared by [`found_space`] and
+/// [`recover_space`]: a relay endpoint so the founder is reachable and can
+/// publish, with its own key standing in the responder field a solo founder
+/// never dials.
+async fn finish_pulled(
+    space: SpaceId,
+    authority: SharedLedgerAuthority,
+    replica: Replica,
+    seed: [u8; 32],
+    relay: &str,
+) -> PulledSpace {
     let network = Network::Local(LocalNet {
         relays: vec![relay.to_owned()],
     });
@@ -499,11 +615,6 @@ pub async fn found_space(
             .key_bytes()
             .expect("founder device key bytes"),
     );
-
-    console_log(&format!(
-        "[lait] founded Space {} (resumed={resumed})",
-        space.as_str()
-    ));
     PulledSpace {
         space,
         authority,
@@ -513,4 +624,20 @@ pub async fn found_space(
         responder,
         seed,
     }
+}
+
+/// Remove every slot from this Space's store directory, releasing the OPFS
+/// handle before returning. Used only on the recovery path, where a store an
+/// older build wrote must be cleared before a fresh one is created in its place.
+async fn wipe_store(tag: &str, space: &SpaceId, seed: &[u8; 32]) {
+    use journal::Medium as _;
+    if let Ok(medium) = journal::OpfsMedium::open(&space_dir(tag, space, seed)).await {
+        if let Ok(names) = medium.slot_names() {
+            for name in names {
+                let _ = medium.remove_slot(&name);
+            }
+        }
+    }
+    // `medium` drops here, closing its OPFS access handles so the caller can
+    // reopen the same directory without an exclusive-access refusal.
 }

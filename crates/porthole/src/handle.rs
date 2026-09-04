@@ -1240,12 +1240,73 @@ pub async fn found(
     release: String,
     mount: String,
 ) -> Result<BrowserEngineHandle, JsValue> {
-    use world_sdk::WorldApplication;
     let seed = unhex32(&seed_hex);
+    let PreparedWorld {
+        registry,
+        control,
+        client_runner,
+        world_id,
+        implementation,
+        implementation_version,
+        founder_grants,
+    } = prepare_world(&runner_wasm, &world, version, release)?;
 
-    let module = WebModule::compile(&runner_wasm);
+    let pulled = match crate::space_pull::found_space(
+        &relay,
+        seed,
+        &world,
+        implementation,
+        implementation_version,
+        founder_grants,
+        |replica| runtime::browser::declare_schemas(replica, &registry),
+    )
+    .await
+    {
+        Ok(pulled) => pulled,
+        // A local store an older build wrote cannot be reopened by this build.
+        // Do not crash — signal it so the Worker fetches the durable bucket copy
+        // and calls `recover` to adopt it (or re-found if nothing was published).
+        Err(crate::space_pull::ResumeIncompatible) => {
+            return Err(JsValue::from_str("RESUME_INCOMPATIBLE"));
+        }
+    };
+
+    compose_over(
+        pulled,
+        registry,
+        control,
+        client_runner,
+        world_id,
+        seed,
+        mount,
+    )
+    .await
+}
+
+/// Everything a founding needs off the World runner, read world-agnostically
+/// before registration moves it — shared by [`found`] and [`recover`].
+/// `implementation` is `Copy`, so it feeds both `register_reviewed` and the
+/// founding call.
+struct PreparedWorld {
+    registry: runtime::world::Catalog,
+    control: Arc<RemoteWorld>,
+    client_runner: Arc<RemoteWorld>,
+    world_id: replica::body::WorldId,
+    implementation: [u8; 32],
+    implementation_version: u32,
+    founder_grants: Vec<contact::founding::FounderGrant>,
+}
+
+fn prepare_world(
+    runner_wasm: &[u8],
+    world: &str,
+    version: String,
+    release: String,
+) -> Result<PreparedWorld, JsValue> {
+    use world_sdk::WorldApplication;
+    let module = WebModule::compile(runner_wasm);
     let init = GuestInit {
-        world: world.clone(),
+        world: world.to_string(),
         version,
         release,
     };
@@ -1288,10 +1349,50 @@ pub async fn found(
 
     let control = launch("control")?;
     let client_runner = launch("client")?;
+    Ok(PreparedWorld {
+        registry,
+        control,
+        client_runner,
+        world_id,
+        implementation,
+        implementation_version,
+        founder_grants,
+    })
+}
 
-    let pulled = crate::space_pull::found_space(
+/// Recover a bare-visit founder whose local store [`found`] could not reopen
+/// (it returned `RESUME_INCOMPATIBLE`): the Worker fetches the durable copy from
+/// the bucket and calls this with those bytes — or `None` if the bucket held
+/// nothing. [`crate::space_pull::recover_space`] clears the unreadable store and
+/// ADOPTS the snapshot (or re-founds when there is none), then composes the same
+/// engine `found` does.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub async fn recover(
+    relay: String,
+    seed_hex: String,
+    snapshot: Option<Vec<u8>>,
+    runner_wasm: Vec<u8>,
+    world: String,
+    version: String,
+    release: String,
+    mount: String,
+) -> Result<BrowserEngineHandle, JsValue> {
+    let seed = unhex32(&seed_hex);
+    let PreparedWorld {
+        registry,
+        control,
+        client_runner,
+        world_id,
+        implementation,
+        implementation_version,
+        founder_grants,
+    } = prepare_world(&runner_wasm, &world, version, release)?;
+
+    let pulled = crate::space_pull::recover_space(
         &relay,
         seed,
+        snapshot,
         &world,
         implementation,
         implementation_version,
@@ -1310,6 +1411,16 @@ pub async fn found(
         mount,
     )
     .await
+}
+
+/// The bucket object key a bare-visit founder's Space publishes to, from the
+/// device seed alone (the Space id is deterministic in it) — so the Worker can
+/// fetch the durable copy during recovery, before any handle exists.
+#[wasm_bindgen]
+pub fn object_key_for_seed(seed_hex: String) -> String {
+    let seed = unhex32(&seed_hex);
+    let space = contact::founding::founding_identity(&seed).space;
+    contact::gateway::object_key(&space)
 }
 
 /// The base32 render of a Body id — the form the tree renders Body ids in, and

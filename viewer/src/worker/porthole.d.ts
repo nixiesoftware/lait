@@ -50,9 +50,37 @@ declare module "porthole" {
     mount: string,
   ): Promise<BrowserEngineHandle>;
 
-  /** Manual wasm init: `await init(wasmUrl)` before `boot` (the `?url` posture,
-   *  wasm-pack `--target web`). */
+  /** Recover a bare-visit founder whose local store `found` could not reopen
+   *  (it rejected with `RESUME_INCOMPATIBLE`). Pass the durable snapshot fetched
+   *  from the bucket to ADOPT it, or `undefined` to re-found. Clears the
+   *  unreadable store, then composes the same engine `found` does. */
+  export function recover(
+    relay: string,
+    seed_hex: string,
+    snapshot: Uint8Array | undefined,
+    runner_wasm: Uint8Array,
+    world: string,
+    version: string,
+    release: string,
+    mount: string,
+  ): Promise<BrowserEngineHandle>;
+
+  /** The bucket object key a bare-visit founder's Space publishes to, from the
+   *  device seed alone — lets the Worker fetch the durable copy during recovery
+   *  before any handle exists. */
+  export function object_key_for_seed(seed_hex: string): string;
+
+  /** Manual wasm init before `boot` (the `?url` posture, wasm-pack
+   *  `--target web`). Modern wasm-bindgen takes a single options object —
+   *  `await init({ module_or_path: wasmUrl })`; the bare-value form is
+   *  deprecated and warns. */
   export default function init(
-    module_or_path?: string | URL | Request | Response | WebAssembly.Module,
+    options?:
+      | { module_or_path: string | URL | Request | Response | WebAssembly.Module }
+      | string
+      | URL
+      | Request
+      | Response
+      | WebAssembly.Module,
   ): Promise<unknown>;
 }

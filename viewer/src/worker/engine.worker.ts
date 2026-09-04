@@ -17,7 +17,13 @@
  * `workerLink(worker)` so no frame is posted before the router is listening.
  */
 
-import init, { boot, found } from "porthole";
+import init, {
+  boot,
+  found,
+  recover,
+  object_key_for_seed,
+  type BrowserEngineHandle,
+} from "porthole";
 
 import { engineRouter } from "./engineRouter";
 
@@ -153,8 +159,64 @@ async function deviceSeed(): Promise<string> {
   }
 }
 
+// A bare visit FOUNDS — but if this build cannot reopen the local store an
+// older build left, `found` rejects with `RESUME_INCOMPATIBLE` rather than
+// crashing. Recover it: fetch the Space's durable copy from the bucket and
+// ADOPT it (the bucket carries the original epoch, so adopting beats
+// re-founding, which would mint a conflicting one); re-found only if the bucket
+// holds nothing. The Space id is deterministic in the seed, so the object key
+// is unchanged and the bucket copy still matches.
+async function foundOrRecover(
+  message: BootMessage,
+  seedHex: string,
+  runner: Uint8Array,
+): Promise<BrowserEngineHandle> {
+  try {
+    return await found(
+      message.relay,
+      seedHex,
+      runner,
+      message.world,
+      message.version,
+      message.release,
+      message.mount,
+    );
+  } catch (error) {
+    if (!String(error).includes("RESUME_INCOMPATIBLE")) throw error;
+    let snapshot: Uint8Array | undefined;
+    if (message.bucketBase) {
+      try {
+        const key = object_key_for_seed(seedHex);
+        const got = await fetch(`${message.bucketBase}/${key}`, {
+          cache: "no-store",
+        });
+        if (got.ok) snapshot = new Uint8Array(await got.arrayBuffer());
+      } catch (bucketError) {
+        console.warn("[lait] recovery bucket read failed:", bucketError);
+      }
+    }
+    console.log(
+      `[lait] the local store is from an older version; ${
+        snapshot ? "adopting the bucket copy" : "re-founding"
+      }`,
+    );
+    return recover(
+      message.relay,
+      seedHex,
+      snapshot,
+      runner,
+      message.world,
+      message.version,
+      message.release,
+      message.mount,
+    );
+  }
+}
+
 async function stand(message: BootMessage): Promise<void> {
-  await init(message.engineWasmUrl);
+  // wasm-bindgen's init takes a single options object now; the bare-URL form
+  // is deprecated and warns. `module_or_path` is the same value either way.
+  await init({ module_or_path: message.engineWasmUrl });
   const seedHex = await deviceSeed();
   const runner = new Uint8Array(
     await (await fetch(message.runnerUrl)).arrayBuffer(),
@@ -171,15 +233,7 @@ async function stand(message: BootMessage): Promise<void> {
         message.release,
         message.mount,
       )
-    : await found(
-        message.relay,
-        seedHex,
-        runner,
-        message.world,
-        message.version,
-        message.release,
-        message.mount,
-      );
+    : await foundOrRecover(message, seedHex, runner);
   engineRouter(handle, scope);
   scope.postMessage({ type: "ready" });
 

@@ -72,6 +72,10 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 postcard = { version = "1", features = ["use-std"] }
+# A panic surfaces as a readable console error (message + location) instead of a
+# bare `RuntimeError: unreachable` that names nothing — a shipped engine that can
+# only fail opaquely cannot be debugged from a user's crash report.
+console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"
 # Async `#[wasm_bindgen]` exports (boot, repull, publishCaret) compile to JS
 # Promises through this glue.
