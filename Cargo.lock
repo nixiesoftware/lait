@@ -1107,6 +1107,7 @@ dependencies = [
  "blake3",
  "comms",
  "data-encoding",
+ "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
  "journal",
  "mechanics",
@@ -4239,6 +4240,25 @@ dependencies = [
  "lait-signage-app",
  "world-runner",
  "world-sdk",
+]
+
+[[package]]
+name = "lait-snapshot-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "contact",
+ "journal",
+ "mechanics",
+ "postcard",
+ "replica",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

@@ -27,6 +27,9 @@ comms = { path = "../comms", optional = true }
 
 anyhow = "1"
 blake3 = "1"
+# The write gateway signs and verifies a device's intent to replace a snapshot.
+# Already in the tree under mechanics; the version is pinned to match.
+ed25519-dalek = "2"
 # Ticket rendering: base32 link form, NFC-stable display names.
 data-encoding = "2.6"
 unicode-normalization = "0.1"

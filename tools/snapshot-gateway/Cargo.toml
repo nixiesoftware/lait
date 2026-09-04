@@ -1,0 +1,44 @@
+[package]
+name = "lait-snapshot-gateway"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "The conditional write in front of the daemon-less hosting bucket: authorizes a member's snapshot PUT against the Space's own signed ledger, then writes it under a generation-match precondition"
+# The one piece of trusted infrastructure daemon-less hosting needs, and
+# deliberately tiny. It holds no key, reads no plaintext, mints no credential:
+# the authority is `contact::gateway`, replaying the Space's public signed
+# effects exactly as a peer would. Everything Space-specific lives in that
+# library and is tested there; this binary is the HTTP + GCS shell.
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lait-snapshot-gateway"
+path = "src/main.rs"
+
+[dependencies]
+contact = { path = "../../crates/contact" }
+mechanics = { path = "../../crates/mechanics" }
+anyhow = "1"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync", "io-util"] }
+# GCS reads and conditional writes, pure-Rust TLS — the same fetch stack the
+# feed and notify relay use, no reqwest/native-tls C dependency.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# The tests mint a real Space and drive the whole PUT path on genuine signed
+# material — the same construction contact's own gateway tests use.
+journal = { path = "../../crates/journal" }
+replica = { path = "../../crates/replica" }
+postcard = { version = "1", features = ["use-std"] }
+
+[lints]
+workspace = true

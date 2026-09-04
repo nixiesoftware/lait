@@ -37,6 +37,7 @@ members = [
     "tools/astrolabe-ios",
     "tools/feed",
     "tools/feed-notify",
+    "tools/snapshot-gateway",
     "tools/stub",
     "tools/world-fixture",
     "tools/world-channel-installer",
