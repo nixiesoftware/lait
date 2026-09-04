@@ -35,6 +35,9 @@ import { ProjectIcon } from "./icons";
 import { Badge, ContextMenu, Divider, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
 import { cn, navigationItem } from "./primitives";
 
+/** What an unnamed Space reads as until it is named — never its raw `ws_…` id. */
+const UNNAMED_SPACE = "Untitled workspace";
+
 /** Linear-shaped navigation over lait's local identities and projects. */
 export function Sidebar({
   spaces,
@@ -378,8 +381,12 @@ function SpaceSwitcher({
   onPruneSpaces: () => void;
 }) {
   const selected = spaces.find((s) => s.id === current) ?? null;
+  // Never fall through to the raw `ws_…` id — that is a machine identifier (the
+  // menu offers it verbatim as "Copy space ID"), not a name. An unnamed Space
+  // reads as a placeholder until it is named; only the absence of any selection
+  // is "Choose a space".
   const title = (currentName?.trim() || selected?.name || rowSeenName(selected))
-    || selected?.space || "Choose a space";
+    || (selected ? UNNAMED_SPACE : "Choose a space");
   // A row whose store is gone. It has no remedy anywhere else in the app: the
   // registry is only ever *written* by founding and entering, so nothing else
   // clears one and it sits in the switcher for good. A served (browser) row has
@@ -478,7 +485,7 @@ function SpaceSwitcher({
                       <Folder className="size-icon-sm shrink-0" />
                     )
                   }
-                  label={space.name || rowSeenName(space) || space.space}
+                  label={space.name || rowSeenName(space) || UNNAMED_SPACE}
                   // An agent replica is a different *identity* on the same data,
                   // which is the only thing worth saying twice.
                   {...(space.identity.kind === "agent"
