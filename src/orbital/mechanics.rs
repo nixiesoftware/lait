@@ -473,9 +473,19 @@ impl Inner {
                 ));
             }
         }
-        // We can only admit + seal if we ourselves are an admin with the key.
+        // We can admit + seal if we ourselves are an admin with the key — or,
+        // where the Space has opted into member-driven admission, if we are a
+        // MEMBER that can actually seal (holds an epoch key to seal to the
+        // newcomer). This gate only decides whether THIS node is entitled to
+        // author the admission at all; the per-assignment `may_delegate` gate
+        // below is unchanged and remains the authorization — a member redeems
+        // only what it can itself delegate. When the flag is off this is
+        // byte-for-byte the admin-only check it replaces.
+        let member_admission = acl_state.member_admission();
         match self.my_actor() {
             Some(me) if acl_state.is_admin(&me) => {}
+            Some(me)
+                if member_admission && acl_state.is_member(&me) && !self.keyring.is_empty() => {}
             _ => return Err(anyhow!("this node is not an admin")),
         }
         if acl_state.is_invite_revoked(&admission.nonce) {
@@ -609,6 +619,63 @@ impl Inner {
 
             prev = op.hash();
             effects.push(Effect::Acl(op).encode());
+        }
+        // Member-driven admission propagates the admit-cap. On a Space that has
+        // opted in, a CONTRIBUTOR-level admission ALSO delegates each of its
+        // assignments to the newcomer, so the newcomer can in turn admit — its
+        // `holds_any_delegation` becomes true and it holds delegations for
+        // exactly these assignments. Bounded three ways: admin-level admissions
+        // do not propagate (`!"space.admin"`), the policy-admin meta-capability
+        // is skipped (and un-delegable at replay regardless), and each
+        // `GrantDelegation` is authorized at replay only because THIS redeemer
+        // already effectively holds the matching delegation (an admin as policy
+        // admin; a member via its own admit-cap). A member can therefore hand on
+        // exactly the admit-cap it received and no wider.
+        let propagate_admit_cap = member_admission && !caps.contains(&"space.admin");
+        if propagate_admit_cap {
+            let meta_cap = acl::policy_admin_capability();
+            let meta_res = acl::policy_admin_resource();
+            for (i, (capability, resource)) in admission.evidence.assignments.iter().enumerate() {
+                if *capability == meta_cap && *resource == meta_res {
+                    continue;
+                }
+                // Deterministic salt, in a delegation-specific context so it
+                // cannot collide with the grant salt derived above.
+                let mut salt_input = acceptance_id.to_vec();
+                salt_input.extend_from_slice(b"admit-cap-delegation");
+                let assignment_index =
+                    u32::try_from(i).context("too many admission assignments")?;
+                salt_input.extend_from_slice(&assignment_index.to_be_bytes());
+                let derived = blake3::derive_key("lait.admission-delegation-salt.v1", &salt_input);
+                let mut salt = [0u8; 16];
+                salt.copy_from_slice(
+                    derived
+                        .get(..16)
+                        .ok_or_else(|| anyhow!("derived admission delegation salt is too short"))?,
+                );
+                let delegation_id =
+                    acl::capability_delegation_id(&joiner_actor, capability, resource, &salt)
+                        .ok_or_else(|| anyhow!("delegation id"))?;
+                let op = acl::sign_op(
+                    &self.seed,
+                    &AclOp {
+                        action: AclAction::GrantDelegation {
+                            delegation_id,
+                            actor: joiner_actor.clone(),
+                            capability: capability.clone(),
+                            resource: resource.clone(),
+                            salt,
+                        },
+                        by: me_actor.clone(),
+                        actor_asof: actor_asof.clone(),
+                        nonce: None,
+                    },
+                    vec![prev.clone()],
+                    &self.space,
+                );
+                prev = op.hash();
+                effects.push(Effect::Acl(op).encode());
+            }
         }
         self.ledger
             .commit_batch(&effects, &sealed_records)
@@ -2010,6 +2077,28 @@ impl SpaceAuthority {
     /// with the version that lets a caller order it against its own build.
     pub fn active_implementation_state(&self, world: &str) -> Option<acl::ActiveImplementation> {
         self.lock().acl().active_implementation_state(world)
+    }
+
+    /// Opt this Space into (or out of) **member-driven admission**, authored as
+    /// a `SetMemberAdmission` op. Replay honors it only for a policy admin, so
+    /// a non-admin calling this produces an op that no replica accepts. Off by
+    /// default; idempotent (a no-op when already in the requested state).
+    pub fn set_member_admission(&self, enabled: bool) -> Result<()> {
+        let mut inner = self.lock();
+        if inner.acl().member_admission() == enabled {
+            return Ok(());
+        }
+        inner.author(
+            AclAction::SetMemberAdmission { enabled },
+            None,
+            vec![],
+            vec![],
+        )
+    }
+
+    /// Whether this Space has opted into member-driven admission.
+    pub fn member_admission_enabled(&self) -> bool {
+        self.lock().acl().member_admission()
     }
 
     /// Resolve an actor by its actor id or one of its device keys (the

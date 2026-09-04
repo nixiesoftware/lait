@@ -298,6 +298,28 @@ pub enum AclAction {
         salt: [u8; 16],
         origin: GrantOrigin,
     },
+    /// Turn **member-driven admission** on or off for this Space. Authorized
+    /// only when its author holds Space **policy administration** — a non-admin
+    /// can never flip it, so the relaxation it enables stays an administrator's
+    /// per-Space decision. Absent ⇒ **off** (every existing Space is unchanged);
+    /// the last authorized setting in topo order wins (like
+    /// [`AclAction::ActivateWorldImplementation`]), so an authorized `false`
+    /// revokes it. No subject actor; grow-only.
+    ///
+    /// When ON, [`judge_op`] additionally authorizes an [`AclAction::AddMember`]
+    /// **that confers no [`Standing::Admin`]** authored by a non-admin human
+    /// member holding delegate authority (an "admit-cap"): a member may vouch a
+    /// newcomer in, bounded to exactly the assignments it can already delegate
+    /// (each rides its own [`AclAction::GrantCapabilityFrom`], gated unchanged
+    /// on the author's delegation) and never membership authority. The flag is
+    /// the ONLY gate that moves; the delegation checks remain the authorization.
+    /// It also lets such a member hand on **exactly an admit-cap it itself
+    /// holds** (a [`AclAction::GrantDelegation`] for a capability/resource it
+    /// already effectively delegates — never the meta-capability), so a
+    /// member-admitted member can admit in turn, bounded to what it received.
+    SetMemberAdmission {
+        enabled: bool,
+    },
 }
 
 /// What a World's activation put in force.
@@ -375,6 +397,18 @@ impl PolicyPass {
                 && &d.resource == resource
         })
     }
+
+    /// Whether `actor` holds **any** effective (authorized, unrevoked)
+    /// delegation — the "has been granted delegate authority" gate that
+    /// member-driven admission's relaxed [`AclAction::AddMember`] requires of
+    /// its author. A member with no delegation cannot admit even under the flag:
+    /// the admit-cap is a delegation, so a plain viewer or writer that was never
+    /// delegated to stays exactly as unable to admit as it is today.
+    fn holds_any_delegation(&self, actor: &ActorId) -> bool {
+        self.delegations
+            .iter()
+            .any(|(id, d)| !self.revoked_delegations.contains(id) && &d.actor == actor)
+    }
 }
 
 /// The canonical grant-id commitment: BLAKE3 derive-key over the exact grant
@@ -445,7 +479,8 @@ impl AclAction {
             | AclAction::RevokeCapability { .. }
             | AclAction::GrantDelegation { .. }
             | AclAction::RevokeDelegation { .. }
-            | AclAction::ActivateWorldImplementation { .. } => None,
+            | AclAction::ActivateWorldImplementation { .. }
+            | AclAction::SetMemberAdmission { .. } => None,
         }
     }
 
@@ -466,6 +501,7 @@ impl AclAction {
             AclAction::GrantDelegation { .. } => "grant_delegation",
             AclAction::RevokeDelegation { .. } => "revoke_delegation",
             AclAction::ActivateWorldImplementation { .. } => "activate_implementation",
+            AclAction::SetMemberAdmission { .. } => "set_member_admission",
         }
     }
 }
@@ -600,6 +636,13 @@ pub struct AclState {
     /// count for an admission capability's reuse cap). A single-use nonce
     /// resolves to at most one after convergence.
     nonce_admits: BTreeMap<[u8; 16], BTreeSet<ActorId>>,
+    /// Whether this Space has opted into **member-driven admission**: the last
+    /// authorized [`AclAction::SetMemberAdmission`] in topo order, or `false`
+    /// when none. Off by default (fails closed with the rest of this struct);
+    /// read through [`AclState::member_admission`], which additionally refuses
+    /// on an `unresolved` state.
+    #[serde(default)]
+    member_admission: bool,
     /// Set when this state stands in for a replay that did not happen.
     ///
     /// Half of this struct fails closed on its own: no members, no admins, no
@@ -751,6 +794,15 @@ impl AclState {
     /// effective meta-capability grant, and currently a member).
     pub fn is_policy_admin(&self, a: &ActorId) -> bool {
         self.policy_admins.contains(a)
+    }
+
+    /// Whether this Space has opted into **member-driven admission**. An
+    /// `unresolved` state answers `false`: the relaxation is never asserted
+    /// about history that could not be replayed, so a node that cannot read its
+    /// authority ledger falls back to admin-only admission rather than guessing
+    /// the flag is on.
+    pub fn member_admission(&self) -> bool {
+        !self.unresolved && self.member_admission
     }
 
     /// The effective grant ids of exactly `(capability, resource)` held by
@@ -1048,6 +1100,10 @@ pub fn replay_checkpointed(
     let mut humans: BTreeSet<ActorId> = admins.clone();
     let mut agents_now: BTreeMap<ActorId, ActorId> = BTreeMap::new();
     let mut policy = PolicyPass::default();
+    // Member-driven admission, off until an authorized `SetMemberAdmission`
+    // turns it on. Evolves in topo order alongside `admins`/`policy`, so
+    // `judge_op` sees its value as of each op's causal position.
+    let mut member_admission = false;
     // Generation of each authorized key-epoch mint (op hash → gen), for the
     // monotonicity bound: a mint may claim at most `max(ancestor mint gen) + 1`,
     // so no author can jump the generation (e.g. to `u32::MAX`) and pin the
@@ -1102,6 +1158,7 @@ pub fn replay_checkpointed(
                 &epoch_gens,
                 &policy,
                 &ancestors,
+                member_admission,
             );
         entry.authorized = ok;
         audit.push(entry);
@@ -1117,6 +1174,7 @@ pub fn replay_checkpointed(
             &mut agents_now,
             &mut epoch_gens,
             &mut policy,
+            &mut member_admission,
         );
     }
 
@@ -1185,6 +1243,10 @@ fn judge_op(
     epoch_gens: &HashMap<String, u32>,
     policy: &PolicyPass,
     ancestors: &HashMap<String, std::collections::HashSet<String>>,
+    // Member-driven admission, as of this op's causal position (the pass-1
+    // accumulator, evolving in topo order exactly like `admins`/`policy`). Off
+    // for every Space that never authorized a `SetMemberAdmission`.
+    member_admission: bool,
 ) -> bool {
     let by = &op.by;
     // Policy administration: a founder still holding human membership, or a
@@ -1197,7 +1259,27 @@ fn judge_op(
     // Agents have no membership authority, even when their signing device is bound.
     !agents_now.contains_key(by)
         && match &op.action {
-            AclAction::AddMember { .. } | AclAction::SetGrants { .. } => admins.contains(by),
+            // Re-granting standing to an EXISTING member stays admin-only: a
+            // member vouches newcomers in, it never re-roles the seated.
+            AclAction::SetGrants { .. } => admins.contains(by),
+            // Admission. Admin-only by default. Under member-driven admission a
+            // non-admin human member may also admit — but ONLY a newcomer that
+            // gets **no membership authority** (`!grants.contains(Admin)`), and
+            // ONLY if the author itself holds delegate authority (an admit-cap).
+            // This is the ONLY authorization gate the flag moves: the newcomer's
+            // fine capabilities each ride a `GrantCapabilityFrom` whose author
+            // must still hold the matching delegation (below), so a member can
+            // install exactly what it can already delegate and never Admin,
+            // rotate, remove, or a meta-grant. A viewer/writer that was never
+            // delegated to cannot admit — its `holds_any_delegation` is false.
+            AclAction::AddMember { grants, .. } => {
+                admins.contains(by)
+                    || (member_admission
+                        && humans.contains(by)
+                        && !agents_now.contains_key(by)
+                        && !grants.contains(&Standing::Admin)
+                        && policy.holds_any_delegation(by))
+            }
             // Admins remove anyone; a sponsor may retire their own agent.
             AclAction::RemoveMember { actor } => {
                 admins.contains(by) || agents_now.get(actor) == Some(by)
@@ -1303,19 +1385,41 @@ fn judge_op(
             } => {
                 let is_meta = capability == &policy_admin_capability()
                     && resource == &policy_admin_resource();
-                capability.validate().is_ok()
+                let structural = capability.validate().is_ok()
                     && resource.validate().is_ok()
                     && capability.world == resource.world
                     && !is_meta
                     && capability_delegation_id(actor, capability, resource, salt)
-                        == Some(*delegation_id)
-                    && is_policy_admin(by)
+                        == Some(*delegation_id);
+                structural
+                    && (is_policy_admin(by)
+                        // Member-admission propagation: a non-admin human member
+                        // may hand on **exactly an admit-cap it itself holds** —
+                        // a delegation for a `(capability, resource)` it already
+                        // effectively delegates. The `!is_meta` above keeps the
+                        // policy-admin meta-capability un-delegable on this path
+                        // too, so this never manufactures administrator
+                        // authority; the holder can only re-delegate what it was
+                        // given, and no wider. This is what lets a
+                        // member-admitted member admit in turn (its own
+                        // `holds_any_delegation` becomes true), bounded to the
+                        // contributor admit-cap it received.
+                        || (member_admission
+                            && humans.contains(by)
+                            && !agents_now.contains_key(by)
+                            && policy.holds_delegation(by, capability, resource)))
             }
             AclAction::RevokeDelegation { .. } => is_policy_admin(by),
             // Implementation activation is an explicit authority operation.
             AclAction::ActivateWorldImplementation { world, .. } => {
                 crate::demand::Resource::root(world).validate().is_ok() && is_policy_admin(by)
             }
+            // Opting a Space into (or out of) member-driven admission is a
+            // policy decision: **policy administration only**. This is the
+            // fence that answers "who can flip the flag" — a non-admin's
+            // `SetMemberAdmission` is refused at replay on every replica, so no
+            // member can grant itself the relaxation it would then exploit.
+            AclAction::SetMemberAdmission { .. } => is_policy_admin(by),
         }
 }
 
@@ -1329,6 +1433,7 @@ fn apply_authorized(
     agents_now: &mut BTreeMap<ActorId, ActorId>,
     epoch_gens: &mut HashMap<String, u32>,
     policy: &mut PolicyPass,
+    member_admission: &mut bool,
 ) {
     match &op.action {
         AclAction::AddMember { actor, grants } | AclAction::SetGrants { actor, grants } => {
@@ -1427,6 +1532,11 @@ fn apply_authorized(
                     version: *implementation_version,
                 },
             );
+        }
+        // Last authorized setting in topo order wins (mirrors implementation
+        // activation): an authorized `false` cleanly turns it back off.
+        AclAction::SetMemberAdmission { enabled } => {
+            *member_admission = *enabled;
         }
     }
 }
@@ -1578,6 +1688,10 @@ pub fn replay_continue(
     let mut agents_now = prior.agents_now.clone();
     let founders: BTreeSet<ActorId> = genesis.founding_actors.iter().cloned().collect();
     let mut policy = prior.policy.clone();
+    // Resume the flag from the checkpointed state. `prior.state` is resolved
+    // (it is a completed replay), so its getter returns the raw pass-1 value —
+    // last authorized `SetMemberAdmission` in topo order over the prior ops.
+    let mut member_admission = prior.state.member_admission();
     let mut epoch_gens: HashMap<String, u32> = prior
         .epoch_gens
         .iter()
@@ -1606,6 +1720,7 @@ pub fn replay_continue(
                         &epoch_gens,
                         &policy,
                         &ancestors,
+                        member_admission,
                     )
             }
         };
@@ -1625,6 +1740,7 @@ pub fn replay_continue(
             &mut agents_now,
             &mut epoch_gens,
             &mut policy,
+            &mut member_admission,
         );
     }
 
@@ -1689,6 +1805,9 @@ fn materialize_authorized(
     // *signed* record of redemption (replaces the unsigned `C_REDEEMED` doc).
     let mut spent_nonces: BTreeSet<[u8; 16]> = BTreeSet::new();
     let mut policy = PolicyPass::default();
+    // Member-driven admission: last authorized `SetMemberAdmission` in topo
+    // order wins (the `authorized` slice is topo-ordered), `false` if none.
+    let mut member_admission = false;
 
     for h in authorized {
         let Some(op) = decoded.get(h).and_then(Option::as_ref) else {
@@ -1798,6 +1917,9 @@ fn materialize_authorized(
                         version: *implementation_version,
                     },
                 );
+            }
+            AclAction::SetMemberAdmission { enabled } => {
+                member_admission = *enabled;
             }
         }
     }
@@ -2090,6 +2212,7 @@ fn materialize_authorized(
         policy,
         policy_admins,
         nonce_admits,
+        member_admission,
         // This function IS the replay, so its result is by construction the
         // resolved one. `AclState::unresolved` is the only other way to make
         // one, which is what keeps the distinction honest.
@@ -3375,5 +3498,414 @@ mod tests {
             st.is_policy_admin(f.a(2)),
             "the last policy admin's self-revoke is refused"
         );
+    }
+
+    // ---- member-driven admission --------------------------------------------
+    //
+    // The capability: with a per-Space flag ON, a non-admin member holding an
+    // "admit-cap" (a delegation for the invite's assignments) may admit a
+    // newcomer — bounded to exactly what it can already delegate, and NEVER
+    // membership authority. Every gate that makes this safe is `judge_op`, so
+    // these tests drive it directly: `judge_op` is the authorization every
+    // replica runs, so an op it refuses is an op that never converges anywhere,
+    // whatever the redeeming node believed when it authored it.
+
+    fn other_cap() -> crate::demand::PolicyCapability {
+        crate::demand::PolicyCapability::new("w", "cap.b")
+    }
+
+    /// A `GrantDelegation` op for `(cap, res)` to `subject`, salted by `s`.
+    fn delegation_op(
+        f: &Fx,
+        author: u8,
+        by: u8,
+        subject: u8,
+        cap: &crate::demand::PolicyCapability,
+        res: &crate::demand::Resource,
+        s: u8,
+        parents: Vec<String>,
+    ) -> SignedOp {
+        let salt = [s; 16];
+        let delegation_id = capability_delegation_id(f.a(subject), cap, res, &salt).unwrap();
+        f.op(
+            author,
+            by,
+            AclAction::GrantDelegation {
+                delegation_id,
+                actor: f.a(subject).clone(),
+                capability: cap.clone(),
+                resource: res.clone(),
+                salt,
+            },
+            parents,
+        )
+    }
+
+    /// A `GrantCapabilityFrom` op standing `(cap, res)` on `subject`, salted by
+    /// `s` — the shape an admission installs per assignment.
+    fn grant_op(
+        f: &Fx,
+        author: u8,
+        by: u8,
+        subject: u8,
+        cap: &crate::demand::PolicyCapability,
+        res: &crate::demand::Resource,
+        s: u8,
+        parents: Vec<String>,
+    ) -> SignedOp {
+        let salt = [s; 16];
+        let grant_id = capability_grant_id(f.a(subject), cap, res, &salt).unwrap();
+        f.op(
+            author,
+            by,
+            AclAction::GrantCapabilityFrom {
+                grant_id,
+                actor: f.a(subject).clone(),
+                capability: cap.clone(),
+                resource: res.clone(),
+                salt,
+                origin: GrantOrigin::Admission {
+                    definition_ref: vec![],
+                },
+            },
+            parents,
+        )
+    }
+
+    fn add_member_op(f: &Fx, author: u8, by: u8, subject: u8, parents: Vec<String>) -> SignedOp {
+        f.op(
+            author,
+            by,
+            AclAction::AddMember {
+                actor: f.a(subject).clone(),
+                grants: vec![Standing::Write],
+            },
+            parents,
+        )
+    }
+
+    fn set_flag_op(f: &Fx, author: u8, by: u8, enabled: bool, parents: Vec<String>) -> SignedOp {
+        f.op(
+            author,
+            by,
+            AclAction::SetMemberAdmission { enabled },
+            parents,
+        )
+    }
+
+    /// Founder makes actor 2 a plain Write member and a delegate for `some_cap`
+    /// (its admit-cap), and turns member-admission ON. The common preamble; the
+    /// returned ops are causally chained, so `some_cap` and the flag are both
+    /// live at every op that follows.
+    fn admit_capable_member(f: &Fx) -> Vec<SignedOp> {
+        let add2 = add_member_op(f, 1, 1, 2, vec![]);
+        let flag = set_flag_op(f, 1, 1, true, vec![add2.hash()]);
+        let deleg = delegation_op(f, 1, 1, 2, &some_cap(), &some_res(), 1, vec![flag.hash()]);
+        vec![add2, flag, deleg]
+    }
+
+    /// POSITIVE. Flag ON, a non-admin member holding the contributor admit-cap
+    /// redeems a newcomer: the newcomer is admitted (Write), and each assignment
+    /// it holds is exactly one the admitter could delegate. Nothing here is
+    /// authored by an admin — actor 2 is a plain member.
+    #[test]
+    fn member_admission_on_a_delegate_member_admits_a_contributor() {
+        let f = fx(1, &[2, 3]);
+        let mut ops = admit_capable_member(&f);
+        let last = ops.last().unwrap().hash();
+        // Actor 2 (NON-admin) admits actor 3 and stands the delegated cap on it.
+        let add3 = add_member_op(&f, 2, 2, 3, vec![last]);
+        let grant3 = grant_op(&f, 2, 2, 3, &some_cap(), &some_res(), 2, vec![add3.hash()]);
+        ops.push(add3);
+        ops.push(grant3);
+        let st = f.replay(&ops);
+
+        assert!(st.member_admission(), "the Space opted in");
+        assert!(!st.is_admin(f.a(2)), "the admitter is only a member");
+        assert!(
+            st.is_member(f.a(3)),
+            "the newcomer was admitted by a member"
+        );
+        assert!(st.can_write(f.a(3)), "with content authority");
+        assert_eq!(st.standing(f.a(3)), Some("member"));
+        assert!(
+            st.has_capability(f.a(3), &some_cap(), &some_res()),
+            "and exactly the fine capability the admitter could delegate"
+        );
+        // The bound, stated as an assertion: the newcomer holds NO membership
+        // authority of any kind.
+        assert!(!st.is_admin(f.a(3)));
+        assert!(!st.is_policy_admin(f.a(3)));
+    }
+
+    /// ESCALATION-PROOF (the critical property). Under the flag, a delegate
+    /// member still cannot manufacture authority beyond its own delegation.
+    ///
+    /// The argument, walked: an admission is an `AddMember` plus one
+    /// `GrantCapabilityFrom` per assignment. `judge_op` authorizes each op
+    /// independently on every replica, and it is the only thing that does — a
+    /// redeeming node's local checks decide only whether it bothers to author,
+    /// never whether the result sticks. So:
+    ///  (a) `AddMember` is refused the instant its grants include `Admin`
+    ///      (`!grants.contains(Admin)`), so no member-authored admission can
+    ///      confer membership authority — admin / rotate / remove / invite-
+    ///      revoke all ride `Admin` standing, and none is reachable.
+    ///  (b) each `GrantCapabilityFrom` is refused unless the author holds a
+    ///      delegation for that EXACT capability/resource, so the newcomer's
+    ///      fine capabilities are a subset of the admitter's delegable set — a
+    ///      capability the admitter cannot delegate is a capability the newcomer
+    ///      cannot receive.
+    ///  (c) the policy-admin meta-capability is never delegable (the `is_meta`
+    ///      fence on both grant and delegation), so no member can install it and
+    ///      no member can become a policy admin along the way.
+    /// There is therefore no op sequence by which redeeming yields the member,
+    /// or the newcomer, admin / rotate / remove / full-invite power.
+    #[test]
+    fn member_admission_a_delegate_member_cannot_escalate() {
+        let f = fx(1, &[2, 3]);
+        let mut ops = admit_capable_member(&f);
+        let base = ops.last().unwrap().hash();
+
+        // (a) actor 2 tries to admit actor 3 AS AN ADMIN.
+        let admit_admin = f.op(
+            2,
+            2,
+            AclAction::AddMember {
+                actor: f.a(3).clone(),
+                grants: vec![Standing::Admin, Standing::Write],
+            },
+            vec![base.clone()],
+        );
+        // (b) actor 2 tries to stand a capability it does NOT hold a delegation
+        // for onto actor 3.
+        let grant_undelegated = grant_op(
+            &f,
+            2,
+            2,
+            3,
+            &other_cap(),
+            &some_res(),
+            9,
+            vec![base.clone()],
+        );
+        // (c) actor 2 tries to stand the policy-admin META capability onto 3.
+        let grant_meta = grant_op(
+            &f,
+            2,
+            2,
+            3,
+            &policy_admin_capability(),
+            &policy_admin_resource(),
+            8,
+            vec![base.clone()],
+        );
+        // actor 2 tries to re-delegate a capability it does NOT hold.
+        let deleg_undelegated = delegation_op(
+            &f,
+            2,
+            2,
+            3,
+            &other_cap(),
+            &some_res(),
+            7,
+            vec![base.clone()],
+        );
+        // actor 2 tries to delegate the META capability.
+        let deleg_meta = delegation_op(
+            &f,
+            2,
+            2,
+            3,
+            &policy_admin_capability(),
+            &policy_admin_resource(),
+            6,
+            vec![base.clone()],
+        );
+        // actor 2 tries to flip the flag / grant itself admin.
+        let flip = set_flag_op(&f, 2, 2, true, vec![base.clone()]);
+        let self_admin = f.op(
+            2,
+            2,
+            AclAction::SetGrants {
+                actor: f.a(2).clone(),
+                grants: vec![Standing::Admin, Standing::Write],
+            },
+            vec![base.clone()],
+        );
+
+        ops.extend([
+            admit_admin,
+            grant_undelegated,
+            grant_meta,
+            deleg_undelegated,
+            deleg_meta,
+            flip,
+            self_admin,
+        ]);
+        let st = f.replay(&ops);
+
+        // None of it took. Actor 3 was never admitted at all (its only route in
+        // was an admin-conferring add, refused), and actor 2 gained nothing.
+        assert!(
+            !st.is_member(f.a(3)),
+            "an admin-conferring member-add is refused, so 3 is not even a member"
+        );
+        assert!(
+            !st.has_capability(f.a(3), &other_cap(), &some_res()),
+            "a capability the admitter cannot delegate cannot reach the newcomer"
+        );
+        assert!(
+            !st.has_capability(f.a(3), &policy_admin_capability(), &policy_admin_resource()),
+            "the meta-capability is never installable by a member"
+        );
+        assert!(
+            !st.has_delegation(f.a(3), &other_cap(), &some_res()),
+            "a member cannot delegate what it does not hold"
+        );
+        assert!(
+            !st.has_delegation(f.a(3), &policy_admin_capability(), &policy_admin_resource()),
+            "and never the meta-capability"
+        );
+        assert!(!st.is_admin(f.a(2)), "the admitter is still not an admin");
+        assert!(
+            !st.is_policy_admin(f.a(3)) && !st.is_admin(f.a(3)),
+            "no path yields the newcomer membership authority"
+        );
+    }
+
+    /// PROPAGATION (bounded). A member-admitted member receives the admit-cap —
+    /// a delegation for exactly the assignment — so it can admit in turn, and
+    /// only for that assignment. The escalation test above already proves it
+    /// can re-delegate nothing wider.
+    #[test]
+    fn member_admission_propagates_the_admit_cap_but_no_wider() {
+        let f = fx(1, &[2, 3, 4]);
+        let mut ops = admit_capable_member(&f);
+        let base = ops.last().unwrap().hash();
+        // Actor 2 admits actor 3, stands the cap on it, AND hands on the
+        // admit-cap (re-delegates `some_cap` — authorized because 2 holds it).
+        let add3 = add_member_op(&f, 2, 2, 3, vec![base]);
+        let grant3 = grant_op(&f, 2, 2, 3, &some_cap(), &some_res(), 2, vec![add3.hash()]);
+        let deleg3 = delegation_op(
+            &f,
+            2,
+            2,
+            3,
+            &some_cap(),
+            &some_res(),
+            3,
+            vec![grant3.hash()],
+        );
+        // Now actor 3 — admitted by a member — admits actor 4 on its own.
+        let add4 = add_member_op(&f, 3, 3, 4, vec![deleg3.hash()]);
+        let grant4 = grant_op(&f, 3, 3, 4, &some_cap(), &some_res(), 4, vec![add4.hash()]);
+        ops.extend([add3, grant3, deleg3, add4, grant4]);
+        let st = f.replay(&ops);
+
+        assert!(st.is_member(f.a(3)) && st.has_delegation(f.a(3), &some_cap(), &some_res()));
+        assert!(
+            st.is_member(f.a(4)) && st.has_capability(f.a(4), &some_cap(), &some_res()),
+            "the admit-cap propagated: a member-admitted member admitted a further member"
+        );
+        assert!(
+            !st.is_admin(f.a(3)) && !st.is_admin(f.a(4)),
+            "still never admin"
+        );
+    }
+
+    /// REVOCABLE / BOUNDED. Two convergent kill switches stop further member-
+    /// redemptions: revoking the admitter's delegation, and turning the flag
+    /// back off. Either one, once synced, refuses the next member-authored
+    /// admission at replay.
+    #[test]
+    fn member_admission_is_revocable_two_ways() {
+        // (1) Revoke the admit-cap delegation.
+        let f = fx(1, &[2, 3]);
+        let mut ops = admit_capable_member(&f);
+        let deleg_hash = ops.last().unwrap().hash();
+        // Recompute the delegation id the preamble used (salt 1) to revoke it.
+        let deleg_id =
+            capability_delegation_id(f.a(2), &some_cap(), &some_res(), &[1u8; 16]).unwrap();
+        let revoke = f.op(
+            1,
+            1,
+            AclAction::RevokeDelegation {
+                delegation_id: deleg_id,
+            },
+            vec![deleg_hash],
+        );
+        let add3 = add_member_op(&f, 2, 2, 3, vec![revoke.hash()]);
+        ops.push(revoke);
+        ops.push(add3);
+        let st = f.replay(&ops);
+        assert!(
+            !st.has_delegation(f.a(2), &some_cap(), &some_res()),
+            "the admit-cap was revoked"
+        );
+        assert!(
+            !st.is_member(f.a(3)),
+            "with no delegation the member can no longer admit"
+        );
+
+        // (2) Turn the flag back off.
+        let f = fx(1, &[2, 3]);
+        let mut ops = admit_capable_member(&f);
+        let base = ops.last().unwrap().hash();
+        let off = set_flag_op(&f, 1, 1, false, vec![base]);
+        let add3 = add_member_op(&f, 2, 2, 3, vec![off.hash()]);
+        ops.push(off);
+        ops.push(add3);
+        let st = f.replay(&ops);
+        assert!(!st.member_admission(), "the flag is off again");
+        assert!(
+            !st.is_member(f.a(3)),
+            "member-driven admission is refused once the flag is off"
+        );
+    }
+
+    /// FLAG OFF is byte-for-byte today. With no `SetMemberAdmission`, a
+    /// non-admin member is refused exactly as it is today — even one holding a
+    /// delegation. And the delegation itself still works for its own purpose
+    /// (delegated *granting* is unchanged), so the flag gates admission alone.
+    #[test]
+    fn member_admission_off_a_delegate_member_still_cannot_admit() {
+        let f = fx(1, &[2, 3]);
+        // Actor 2 is a delegate member, but the flag is NEVER set.
+        let add2 = add_member_op(&f, 1, 1, 2, vec![]);
+        let deleg = delegation_op(&f, 1, 1, 2, &some_cap(), &some_res(), 1, vec![add2.hash()]);
+        // Actor 2 tries to admit actor 3.
+        let add3 = add_member_op(&f, 2, 2, 3, vec![deleg.hash()]);
+        // Actor 2 also exercises its (unchanged) delegated-granting power onto
+        // itself's peer to show that still works with the flag off.
+        let grant3_by_admin = grant_op(&f, 1, 1, 3, &some_cap(), &some_res(), 5, vec![add3.hash()]);
+        let st = f.replay(&[add2, deleg, add3, grant3_by_admin]);
+
+        assert!(!st.member_admission(), "no opt-in ⇒ off");
+        assert!(
+            !st.is_member(f.a(3)),
+            "a non-admin member cannot admit when the Space never opted in"
+        );
+    }
+
+    /// The flag is an administrator's decision: a non-admin's `SetMemberAdmission`
+    /// is refused at replay, so no member can grant itself the relaxation.
+    #[test]
+    fn only_a_policy_admin_can_flip_member_admission() {
+        let f = fx(1, &[2]);
+        let add2 = add_member_op(&f, 1, 1, 2, vec![]);
+        // Actor 2 (a plain member) tries to turn the flag on.
+        let flip = set_flag_op(&f, 2, 2, true, vec![add2.hash()]);
+        let st = f.replay(&[add2, flip]);
+        assert!(
+            !st.member_admission(),
+            "a non-admin cannot flip the flag — the op is unauthorized at replay"
+        );
+
+        // The founder (a policy admin) can.
+        let f = fx(1, &[2]);
+        let add2 = add_member_op(&f, 1, 1, 2, vec![]);
+        let flip = set_flag_op(&f, 1, 1, true, vec![add2.hash()]);
+        let st = f.replay(&[add2, flip]);
+        assert!(st.member_admission(), "a policy admin opts the Space in");
     }
 }
