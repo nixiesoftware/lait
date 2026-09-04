@@ -38,22 +38,28 @@ fn the_store_runs_in_a_js_host() {
     let medium = Arc::new(MemMedium::new());
     let mut store = Store::open_on(medium.clone()).expect("store opens");
     let sequence = store
-        .commit(
-            &[b"issue-one".to_vec()],
-            &[],
-            Index::NONE,
-            b"meta".to_vec(),
-        )
+        .commit(&[b"issue-one".to_vec()], &[], Index::NONE, b"meta".to_vec())
         .expect("commit lands");
 
     drop(store);
     let store = Store::open_on(medium).expect("store reopens");
     assert_eq!(store.manifest().map(|m| m.sequence), Some(sequence));
-    assert_eq!(store.caller_meta().expect("meta reads"), Some(b"meta".to_vec()));
+    assert_eq!(
+        store.caller_meta().expect("meta reads"),
+        Some(b"meta".to_vec())
+    );
     let required = store.required_objects().expect("required lists");
-    assert_eq!(store.read_object(&required[0]).expect("object reads"), b"issue-one");
+    assert_eq!(
+        store.read_object(&required[0]).expect("object reads"),
+        b"issue-one"
+    );
     store.collect_unreachable().expect("compaction runs");
-    assert_eq!(store.read_object(&required[0]).expect("live data survives GC"), b"issue-one");
+    assert_eq!(
+        store
+            .read_object(&required[0])
+            .expect("live data survives GC"),
+        b"issue-one"
+    );
 }
 
 /// The pack log — the storage format the browser port rides on — commits,

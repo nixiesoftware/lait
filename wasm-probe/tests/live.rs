@@ -28,8 +28,8 @@ const LIVE_ALPN: &[u8] = b"lait/probe/live/1";
 fn rendezvous() -> (String, DeviceId) {
     let relay = option_env!("LIVE_RELAY_URL")
         .expect("ci/browser-live.sh sets LIVE_RELAY_URL at compile time");
-    let peer = option_env!("LIVE_PEER_ID")
-        .expect("ci/browser-live.sh sets LIVE_PEER_ID at compile time");
+    let peer =
+        option_env!("LIVE_PEER_ID").expect("ci/browser-live.sh sets LIVE_PEER_ID at compile time");
     let peer = DeviceId::parse(peer).expect("LIVE_PEER_ID parses as a device id");
     (relay.to_owned(), peer)
 }

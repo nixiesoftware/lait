@@ -29,7 +29,10 @@ fn main() {
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let proof = manifest.join("../crates/world-runner-wasm/tests/proof-world");
-    println!("cargo:rerun-if-changed={}", proof.join("src/lib.rs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        proof.join("src/lib.rs").display()
+    );
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target_dir = out.join("proof-world-target");

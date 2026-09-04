@@ -50,7 +50,10 @@ async fn the_pool_medium_round_trips_and_survives_reopen() {
     drop(read);
     drop(medium);
     let medium = OpfsMedium::open(&dir).await.expect("medium reopens");
-    assert_eq!(medium.slot_names().expect("names"), vec!["hot-0".to_owned()]);
+    assert_eq!(
+        medium.slot_names().expect("names"),
+        vec!["hot-0".to_owned()]
+    );
     let (writer, read) = medium.open_slot("hot-0").expect("slot resumes");
     assert_eq!(writer.len(), 5, "the truncated length survived");
     let mut buf = [0u8; 5];
@@ -84,7 +87,9 @@ async fn the_full_store_runs_on_real_opfs() {
     let sequence = store
         .commit(&[b"issue-one".to_vec()], &[], Index::NONE, b"meta".to_vec())
         .expect("commit lands");
-    store.collect_unreachable().expect("compaction runs on OPFS");
+    store
+        .collect_unreachable()
+        .expect("compaction runs on OPFS");
     drop(store);
 
     // A cold reopen: recovery walks real OPFS bytes, elects the compacted

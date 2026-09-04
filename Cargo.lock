@@ -1108,6 +1108,7 @@ dependencies = [
  "comms",
  "data-encoding",
  "getrandom 0.3.4",
+ "journal",
  "mechanics",
  "n0-future",
  "postcard",

@@ -44,7 +44,11 @@ fn describe_returns_the_guests_own_service_identity() {
     let reply = instance
         .open()
         .unwrap()
-        .dispatch(Operation::Describe, &mut no_callback, no_detached_callbacks())
+        .dispatch(
+            Operation::Describe,
+            &mut no_callback,
+            no_detached_callbacks(),
+        )
         .expect("describe answers");
     let Reply::Descriptor(descriptor) = reply else {
         panic!("describe did not return a descriptor");
@@ -75,7 +79,11 @@ fn a_call_round_trips_one_synchronous_host_callback() {
             )
             .expect("echo answers")
     };
-    assert_eq!(saw.as_deref(), Some(&b"hello"[..]), "the host saw the payload");
+    assert_eq!(
+        saw.as_deref(),
+        Some(&b"hello"[..]),
+        "the host saw the payload"
+    );
     let Reply::Call { payload } = reply else {
         panic!("echo did not return a call reply");
     };
@@ -93,12 +101,19 @@ fn a_guest_trap_surfaces_as_an_error_and_the_instance_recovers() {
         &mut no_callback,
         no_detached_callbacks(),
     );
-    assert!(trapped.is_err(), "a trapping guest is an error, not a reply");
+    assert!(
+        trapped.is_err(),
+        "a trapping guest is an error, not a reply"
+    );
 
     let reply = instance
         .open()
         .unwrap()
-        .dispatch(Operation::Describe, &mut no_callback, no_detached_callbacks())
+        .dispatch(
+            Operation::Describe,
+            &mut no_callback,
+            no_detached_callbacks(),
+        )
         .expect("the runner answers after recovering from a trap");
     assert!(matches!(reply, Reply::Descriptor(_)));
 }

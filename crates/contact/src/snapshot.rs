@@ -22,6 +22,11 @@
 //! - the **genesis** header — the one thing the staged material cannot carry: a
 //!   cold reader needs `Genesis` to `create_on` a ledger before it can absorb
 //!   anything.
+//!
+//! What the snapshot deliberately does NOT carry is the reader's own World
+//! schema declaration: that is a property of the build doing the restoring, not
+//! of the Space, so [`restore`] takes it as a callback the caller supplies from
+//! its own registry. It is required, not decorative — see [`restore`].
 
 use std::sync::Arc;
 
@@ -137,11 +142,21 @@ pub fn capture(
 /// epoch keys the ledger carries, so an already-admitted member reads and
 /// decrypts; a device the Space never admitted gets a ledger with no key it can
 /// open, which is the correct outcome (admission is a separate, later act).
+///
+/// `declare` runs on the fresh Replica BEFORE any material is incorporated, and
+/// is where the caller declares its World registry's schemas
+/// (`runtime::browser::declare_schemas`). It is not optional housekeeping:
+/// Convergence classifies each body as it arrives, and an undeclared
+/// `(world, schema, version)` takes the opaque-retention branch that no later
+/// declaration and no re-import reverses. A live pull declares through the same
+/// seam; a restore that skipped it stood up a Space whose every body was
+/// retained, intact and unreadable.
 pub fn restore(
     snapshot: SpaceSnapshot,
     seed: [u8; 32],
     ledger_medium: Arc<dyn journal::Medium>,
     replica_medium: Arc<dyn journal::Medium>,
+    declare: impl FnOnce(&mut Replica),
 ) -> Result<(Replica, SharedLedgerAuthority), Failure> {
     let space = snapshot.genesis.space_id.clone();
     let mut ledger = Ledger::create_on(ledger_medium, snapshot.genesis)
@@ -155,18 +170,10 @@ pub fn restore(
     let authority = SharedLedgerAuthority::new(LedgerAuthority::new(space.clone(), ledger, seed));
     let mut replica = Replica::open_on(replica_medium, Arc::new(authority.clone()))
         .map_err(|f| Failure::Convergence(format!("open replica: {f:?}")))?;
+    declare(&mut replica);
 
     // Commit the authority (which refreshes the keyring with the sealed epoch
     // keys the ledger carries) and incorporate the World material.
-    //
-    // KNOWN GAP (proven by porthole's verify_snapshot_roundtrip): a body whose
-    // epoch key is not in the keyring at import lands OPAQUE and will not read
-    // collaboratively — and re-import does not flip it. `refresh_keyring`
-    // recovers the epochs sealed to this device, but a member that decrypts N
-    // bodies live holds the epoch *history* (older keys, re-sealed across
-    // rotations); recovering only the latest sealed epoch leaves older-epoch
-    // bodies opaque. Closing this needs the full per-device epoch-key history in
-    // the snapshot (or its recovery at restore) — the next slice.
     let bundle = authority.bundle();
     let validated = {
         let mut incorporator = bundle

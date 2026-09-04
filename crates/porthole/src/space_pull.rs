@@ -26,7 +26,7 @@ use comms::{DefaultFactory, Protocols, Transport, TransportFactory};
 use contact::authority::{LedgerAuthority, PendingAdmission, SharedLedgerAuthority};
 use contact::coordinates::SignedCoordinates;
 use contact::pull::{pull_whole, Deadlines};
-use contact::{Outcome, OutboundTransfer};
+use contact::{OutboundTransfer, Outcome};
 use mechanics::ids::{ActorId, SpaceId};
 use mechanics::space::{Authority, Effect, Genesis};
 use mechanics::station::Key;

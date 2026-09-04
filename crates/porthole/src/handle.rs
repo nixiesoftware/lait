@@ -23,7 +23,7 @@ use mechanics::actor::device_from_seed;
 use mechanics::ids::SpaceId;
 use mechanics::station::{Epoch, Key};
 use replica::transaction::{CommitContext, SeedSigner};
-use runtime::world::{AuthorityView, Builder, World};
+use runtime::world::{AuthorityView, Builder, Catalog, World};
 use runtime::{AffectedWorldPublication, ObservationStream};
 use wasm_bindgen::prelude::*;
 use world_runner::wasm_abi::GuestInit;
@@ -62,6 +62,11 @@ pub struct BrowserEngineHandle {
     live: Option<crate::live_client::LiveClient>,
     /// The World identity, for building the `BodyKey` a caret anchor names.
     world_id: replica::body::WorldId,
+    /// The same registry the Station composed over, kept so a snapshot restore
+    /// declares the identical schema set on its fresh Replica. Convergence
+    /// classifies at import and never reinterprets, so a restore that declares
+    /// a different set (or none) retains every body opaquely.
+    registry: Catalog,
     /// The serving mount — the id the viewer keys its selected Space on
     /// (`ServedSpaceRow.id`), and therefore the id a doorbell ring must carry so
     /// the viewer routes it to the current Space. The daemon carries its orbit id
@@ -641,37 +646,54 @@ impl BrowserEngineHandle {
     /// unseal → decrypt path a member cold-reload depends on. Returns
     /// `restored/total` decrypted-body counts; the caller asserts they match
     /// the live Space and are non-zero.
+    ///
+    /// The failure message carries the epoch geometry of all three — live
+    /// authority, restored authority, and the snapshot's own material — because
+    /// "restored 0 of 25" names nothing on its own. Its first reading blamed the
+    /// epoch-key layer; the geometry showed one epoch, sealed to this device, in
+    /// the restored keyring, and 25 bodies opaque anyway. What was actually
+    /// missing was the schema declaration on the restored Replica. Keep the
+    /// geometry: it is what separates "cannot decrypt" from "did not classify".
     pub fn verify_snapshot_roundtrip(&self) -> Result<String, JsValue> {
         let bytes = self.snapshot()?;
         let snapshot = contact::snapshot::SpaceSnapshot::decode(&bytes)
             .map_err(|f| js_err("decode snapshot", format!("{f:?}")))?;
-        let (restored, _authority) = contact::snapshot::restore(
+        let me = device_from_seed(&self.seed);
+        let snapshot_diag = snapshot_epoch_geometry(&snapshot, &me);
+        let (restored, restored_authority) = contact::snapshot::restore(
             snapshot,
             self.seed,
             std::sync::Arc::new(journal::MemMedium::new()),
             std::sync::Arc::new(journal::MemMedium::new()),
+            |replica| runtime::browser::declare_schemas(replica, &self.registry),
         )
         .map_err(|f| js_err("restore snapshot", format!("{f:?}")))?;
 
-        let live_decrypted = self
+        let (live_decrypted, live_bodies) = self
             .station
-            .with_replica_read(|replica| Ok(count_decrypted(replica)))
+            .with_replica_read(|replica| Ok((count_decrypted(replica), body_report(replica))))
             .map_err(|e| js_err("read live replica", format!("{e:?}")))?;
         let restored_keys = restored.body_keys().len();
         let restored_decrypted = count_decrypted(&restored);
 
+        let diag = format!(
+            "live[{} {live_bodies}] restored[{} {}] snapshot[{snapshot_diag}]",
+            authority_epochs(&self.authority),
+            authority_epochs(&restored_authority),
+            body_report(&restored),
+        );
         if restored_decrypted != live_decrypted || restored_decrypted == 0 {
             return Err(js_err(
                 "snapshot round trip",
                 format!(
                     "live decrypted {live_decrypted}, restored decrypted {restored_decrypted} of \
-                     {restored_keys} — older-epoch bodies stay opaque until the snapshot carries \
-                     the full per-device epoch-key history"
+                     {restored_keys} — {diag}"
                 ),
             ));
         }
         Ok(format!(
-            "restored {restored_decrypted}/{restored_keys} bodies, decrypted, matching the live Space"
+            "restored {restored_decrypted}/{restored_keys} bodies, decrypted, matching the live \
+             Space — {diag}"
         ))
     }
 }
@@ -685,6 +707,117 @@ fn count_decrypted(replica: &replica::Replica) -> usize {
         .iter()
         .filter(|key| replica.read_collaborative(key).is_ok())
         .count()
+}
+
+/// First four bytes of an epoch id, as the diagnostic's short name for it.
+fn short_epoch(id: &[u8; 16]) -> String {
+    id[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// One authority's epoch geometry: the keyring it can open, the ACL's
+/// authorized epoch set, and which epochs the ledger holds sealed envelopes
+/// for (marking this device's own). The three sets side by side are what
+/// decides whether the epoch-key-history gap is a retention problem (fix in
+/// the ledger) or a capture problem (re-seal at capture).
+fn authority_epochs(authority: &SharedLedgerAuthority) -> String {
+    let mut inner = authority.0.lock().unwrap_or_else(|p| p.into_inner());
+    let me = inner.me.clone();
+    let keyring: Vec<String> = inner.keyring.keys().map(short_epoch).collect();
+    let acl: Vec<String> = match inner.ledger.acl_state() {
+        Ok(state) => {
+            let mut epochs = state.epochs();
+            epochs.sort_by_key(|e| (e.gen, e.id));
+            epochs
+                .iter()
+                .map(|e| format!("{}#g{}", short_epoch(&e.id), e.gen))
+                .collect()
+        }
+        Err(f) => vec![format!("unreplayable:{f:?}")],
+    };
+    let mut per_epoch: std::collections::BTreeMap<[u8; 16], (usize, bool)> =
+        std::collections::BTreeMap::new();
+    for bytes in inner.ledger.export_sealed() {
+        if let Ok(rec) = mechanics::authorization::SealedKeyRecord::decode(&bytes) {
+            let entry = per_epoch.entry(rec.epoch).or_insert((0, false));
+            entry.0 += 1;
+            entry.1 |= rec.device == me;
+        }
+    }
+    let sealed: Vec<String> = per_epoch
+        .iter()
+        .map(|(id, (n, mine))| {
+            format!("{}x{}{}", short_epoch(id), n, if *mine { "+me" } else { "" })
+        })
+        .collect();
+    format!(
+        "keyring=[{}] acl=[{}] sealed=[{}]",
+        keyring.join(","),
+        acl.join(","),
+        sealed.join(",")
+    )
+}
+
+/// The epochs the snapshot's material actually references: per-epoch artifact
+/// counts from every body transaction's descriptors, beside the sealed
+/// envelopes the authority section carries (marking this device's own).
+fn snapshot_epoch_geometry(
+    snapshot: &contact::snapshot::SpaceSnapshot,
+    me: &mechanics::ids::DeviceId,
+) -> String {
+    use contact::authority::AuthorityRecord;
+    let mut body_epochs: std::collections::BTreeMap<[u8; 16], usize> =
+        std::collections::BTreeMap::new();
+    let mut sealed: std::collections::BTreeMap<[u8; 16], (usize, bool)> =
+        std::collections::BTreeMap::new();
+    for record in &snapshot.staged.authority_records {
+        // Canonical transaction decode first: it requires exact re-encode
+        // equality, so it cannot false-positive on an AuthorityRecord, while
+        // postcard's tolerant enum decode could mistake a transaction.
+        if let Ok(tx) = replica::transaction::Transaction::decode_canonical(record) {
+            for descriptor in &tx.core.descriptors {
+                for reference in descriptor.artifact_refs() {
+                    *body_epochs.entry(reference.epoch).or_insert(0) += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(AuthorityRecord::SealedKey(bytes)) = AuthorityRecord::decode(record) {
+            if let Ok(rec) = mechanics::authorization::SealedKeyRecord::decode(&bytes) {
+                let entry = sealed.entry(rec.epoch).or_insert((0, false));
+                entry.0 += 1;
+                entry.1 |= rec.device == *me;
+            }
+        }
+    }
+    let body: Vec<String> = body_epochs
+        .iter()
+        .map(|(id, n)| format!("{}x{}", short_epoch(id), n))
+        .collect();
+    let sealed: Vec<String> = sealed
+        .iter()
+        .map(|(id, (n, mine))| {
+            format!("{}x{}{}", short_epoch(id), n, if *mine { "+me" } else { "" })
+        })
+        .collect();
+    format!("body_epochs=[{}] sealed=[{}]", body.join(","), sealed.join(","))
+}
+
+/// Per-body presence classes plus how many read back collaboratively — the
+/// split that distinguishes "imported opaque" from "readable but not
+/// collaborative" at a glance.
+fn body_report(replica: &replica::Replica) -> String {
+    let keys = replica.body_keys();
+    let mut opaque = 0usize;
+    let mut collab_ok = 0usize;
+    for key in &keys {
+        if replica.is_opaque(key) {
+            opaque += 1;
+        }
+        if replica.read_collaborative(key).is_ok() {
+            collab_ok += 1;
+        }
+    }
+    format!("bodies={} opaque={opaque} collab_ok={collab_ok}", keys.len())
 }
 
 /// Stand the whole engine up in the Worker: compile the runner once, instantiate
@@ -763,7 +896,7 @@ pub async fn boot(
         pulled.space.clone(),
         pulled.replica,
         Arc::new(authority_view),
-        registry,
+        registry.clone(),
         Epoch::from_u64(1),
     )
     .map_err(|e| js_err("the browser Station does not compose", format!("{e:?}")))?;
@@ -820,6 +953,7 @@ pub async fn boot(
         sessions: RefCell::new(crate::session::SessionHost::default()),
         live,
         world_id,
+        registry,
         mount,
     })
 }
