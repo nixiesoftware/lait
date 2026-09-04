@@ -2377,24 +2377,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lait-issues"
-version = "0.9.5"
-dependencies = [
- "blake3",
- "data-encoding",
- "fabric",
- "mechanics",
- "postcard",
- "replica",
- "runtime",
- "schemars",
- "serde",
- "serde_json",
- "unicode-normalization",
- "unicode-segmentation",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3409,7 +3391,6 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "journal",
- "lait-issues",
  "mechanics",
  "n0-future",
  "postcard",

@@ -1223,6 +1223,7 @@ pub async fn found(
     release: String,
     mount: String,
 ) -> Result<BrowserEngineHandle, JsValue> {
+    use world_sdk::WorldApplication;
     let seed = unhex32(&seed_hex);
 
     let module = WebModule::compile(&runner_wasm);
@@ -1240,29 +1241,29 @@ pub async fn found(
     };
 
     let world_runner = launch("world")?;
-    // The implementation to activate comes off the runner's descriptor — an
-    // inherent, wasm-safe read. The founder GRANTS do NOT: reaching them through
-    // the runner's `WorldApplication::founder_grants` drags the native
-    // application-broker path (tokio net) into the wasm build. They are a pure
-    // property of the World, so `found` sources them directly from the Issues
-    // contract instead — which does couple this founding entry to Issues (unlike
-    // world-agnostic `boot`), the pragmatic price of a wasm-clean founder until
-    // the runner path is made wasm-safe.
+    // Everything founding needs comes off the runner, world-agnostically — the
+    // implementation to activate and the founder GRANTS the World declares —
+    // read BEFORE the runner is registered (which moves it). The grants ride the
+    // same synchronous `dispatch` seam every other runner call does, so nothing
+    // World-specific and nothing native leaks into this substrate entry.
     let implementation = world_runner.reviewed_implementation();
     let implementation_version = world_runner.descriptor().implementation_version.0;
     let world_id = world_runner.descriptor().id.clone();
-    let founder_grants: Vec<contact::founding::FounderGrant> =
-        lait_issues::contract::founder_capabilities()
-            .into_iter()
-            .enumerate()
-            .map(
-                |(index, (capability, resource))| contact::founding::FounderGrant {
-                    capability,
-                    resource,
-                    salt: [index as u8; 16],
-                },
+    let founder_grants: Vec<contact::founding::FounderGrant> = world_runner
+        .founder_grants()
+        .map_err(|e| {
+            js_err(
+                "the runner does not declare its founder grants",
+                format!("{e:?}"),
             )
-            .collect();
+        })?
+        .into_iter()
+        .map(|grant| contact::founding::FounderGrant {
+            capability: grant.capability,
+            resource: grant.resource,
+            salt: grant.salt,
+        })
+        .collect();
     let registry = Builder::new()
         .register_reviewed(world_runner, implementation)
         .build()
