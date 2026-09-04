@@ -39,11 +39,18 @@ use replica::Replica;
 use crate::authority::{AuthorityRecord, LedgerAuthority, SharedLedgerAuthority};
 use crate::protocol::Failure;
 
-/// The most a decoded snapshot may be before validation runs. A live Contact
-/// caps frames and per-transaction change counts; a raw bucket blob has no such
-/// bound, so an unbounded decode is a memory bomb (adversary R4). Bounded here,
-/// before any allocation-heavy validation.
-pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+/// The most a snapshot may be, enforced on BOTH sides of the bucket. On decode
+/// it bounds an untrusted blob before any allocation-heavy validation runs (a
+/// live Contact caps frames; a raw bucket blob has no such bound, so an
+/// unbounded decode is a memory bomb — adversary R4). On capture it refuses to
+/// mint a blob nothing could ever restore: the write path checking is what
+/// turns "a Space outgrew the ceiling" from a reader's mystery, discovered
+/// after the object is already durable, into the writer's named error.
+///
+/// 256 MiB, deliberately larger than one maximal body
+/// (`replica::protected::MAX_BODY_BYTES`, 64 MiB) — a ceiling one legal body
+/// could exhaust was not a ceiling, it was a coin flip.
+pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 
 /// A whole Space, portable: everything a member's device needs to stand the
 /// Space back up from cold, and nothing a daemon owns.
@@ -125,7 +132,7 @@ pub fn capture(
         }
     }
 
-    Ok(SpaceSnapshot {
+    let snapshot = SpaceSnapshot {
         genesis,
         founder_inception,
         staged: StagedContactMaterial {
@@ -134,7 +141,18 @@ pub fn capture(
             manifest_nodes: nodes,
             bodies,
         },
-    })
+    };
+    // The writer's check, not the reader's: a blob over the ceiling would be
+    // refused by every future `decode`, so minting it would durably strand the
+    // Space the moment it landed in a bucket.
+    let encoded_len = snapshot.encode().len();
+    if encoded_len > MAX_SNAPSHOT_BYTES {
+        return Err(Failure::Protocol(format!(
+            "the Space captures to {encoded_len} bytes, over the {MAX_SNAPSHOT_BYTES}-byte \
+             snapshot ceiling — it can no longer be snapshot whole"
+        )));
+    }
+    Ok(snapshot)
 }
 
 /// Restore a Space from a snapshot into fresh storage — the initiator's tail
@@ -159,7 +177,7 @@ pub fn restore(
     declare: impl FnOnce(&mut Replica),
 ) -> Result<(Replica, SharedLedgerAuthority), Failure> {
     let space = snapshot.genesis.space_id.clone();
-    let mut ledger = Ledger::create_on(ledger_medium, snapshot.genesis)
+    let mut ledger = Ledger::create_on(ledger_medium, snapshot.genesis.clone())
         .map_err(|f| Failure::Convergence(format!("create ledger: {f:?}")))?;
     let founder: mechanics::actor::SignedEvent = postcard::from_bytes(&snapshot.founder_inception)
         .map_err(|e| Failure::Protocol(format!("founder inception does not decode: {e}")))?;
@@ -171,6 +189,40 @@ pub fn restore(
     let mut replica = Replica::open_on(replica_medium, Arc::new(authority.clone()))
         .map_err(|f| Failure::Convergence(format!("open replica: {f:?}")))?;
     declare(&mut replica);
+
+    converge(snapshot, &seed, &mut replica, &authority)?;
+    Ok((replica, authority))
+}
+
+/// Converge a snapshot into an EXISTING store — the read half of the bucket's
+/// read-merge-write loop, and the seam a bootstrapped tab absorbs a newer
+/// bucket generation through. `restore` is this over a freshly created pair;
+/// here the pair already holds material, and the same properties that make a
+/// repeated live pull safe make this safe: the ledger's `commit_batch` is
+/// idempotent and order-independent per record, and Body incorporation is a
+/// convergence pass, so absorbing snapshots A then B lands the same decrypted
+/// state as B then A, and re-absorbing what is already held changes nothing.
+///
+/// Refuses a snapshot for a different Space outright: two Spaces' material must
+/// never meet in one store, and a bucket read that followed a stale or hostile
+/// pointer should fail here, loudly, not merge quietly.
+pub fn converge(
+    snapshot: SpaceSnapshot,
+    seed: &[u8; 32],
+    replica: &mut Replica,
+    authority: &SharedLedgerAuthority,
+) -> Result<replica::convergence::ConvergenceOutcome, Failure> {
+    let space = {
+        let inner = authority.0.lock().unwrap_or_else(|p| p.into_inner());
+        inner.space.clone()
+    };
+    if snapshot.genesis.space_id != space {
+        return Err(Failure::Protocol(format!(
+            "the snapshot is of Space {}, not {} — refusing the cross-Space merge",
+            snapshot.genesis.space_id.as_str(),
+            space.as_str()
+        )));
+    }
 
     // Commit the authority (which refreshes the keyring with the sealed epoch
     // keys the ledger carries) and incorporate the World material.
@@ -186,12 +238,10 @@ pub fn restore(
     };
     let commit_ctx = CommitContext {
         space: &space,
-        signer: &SeedSigner(&seed),
+        signer: &SeedSigner(seed),
         authority_frontier: (bundle.frontier)(),
     };
     replica
         .incorporate_bundle(&commit_ctx, validated, bundle.source.as_ref())
-        .map_err(|f| Failure::Convergence(format!("incorporate snapshot: {f:?}")))?;
-
-    Ok((replica, authority))
+        .map_err(|f| Failure::Convergence(format!("incorporate snapshot: {f:?}")))
 }

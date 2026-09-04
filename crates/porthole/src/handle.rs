@@ -700,6 +700,105 @@ impl BrowserEngineHandle {
              Space — {diag}"
         ))
     }
+
+    /// Prove the bucket's read-merge-write algebra (slice 2): given an OLDER
+    /// snapshot `earlier` the harness captured before more material arrived,
+    /// and the current Space as the newer one, show that absorbing them in
+    /// either order lands the same decrypted state, and that re-absorbing held
+    /// material changes nothing:
+    ///
+    /// - restore fresh from `earlier`, converge current in — forward: the
+    ///   merged store decrypts exactly what the live Space does;
+    /// - restore fresh from current, converge `earlier` in — backward: the
+    ///   stale snapshot regresses nothing (the replica frontier is unmoved);
+    /// - converge current into the forward store AGAIN — idempotent: unmoved.
+    ///
+    /// The harness makes `earlier` genuinely older by writing through the
+    /// responder between the capture and this call; the report says how far
+    /// apart the two snapshots were, so a run where nothing arrived (proving
+    /// only idempotence) is legible as that and not as the full claim.
+    #[cfg(feature = "proof")]
+    pub fn verify_snapshot_converge(&self, earlier: &[u8]) -> Result<String, JsValue> {
+        let older = contact::snapshot::SpaceSnapshot::decode(earlier)
+            .map_err(|f| js_err("decode the earlier snapshot", format!("{f:?}")))?;
+        let current_bytes = self.snapshot()?;
+        let current = contact::snapshot::SpaceSnapshot::decode(&current_bytes)
+            .map_err(|f| js_err("decode the current snapshot", format!("{f:?}")))?;
+        let older_bodies = older.staged.bodies.len();
+        let current_bodies = current.staged.bodies.len();
+
+        let fresh = |snapshot: contact::snapshot::SpaceSnapshot| {
+            contact::snapshot::restore(
+                snapshot,
+                self.seed,
+                std::sync::Arc::new(journal::MemMedium::new()),
+                std::sync::Arc::new(journal::MemMedium::new()),
+                |replica| runtime::browser::declare_schemas(replica, &self.registry),
+            )
+            .map_err(|f| js_err("restore snapshot", format!("{f:?}")))
+        };
+
+        // Forward: old store absorbs the newer snapshot.
+        let (mut forward, forward_authority) = fresh(older.clone())?;
+        contact::snapshot::converge(
+            current.clone(),
+            &self.seed,
+            &mut forward,
+            &forward_authority,
+        )
+        .map_err(|f| js_err("converge newer into older", format!("{f:?}")))?;
+
+        // Backward: new store absorbs the stale snapshot — nothing may move.
+        let (mut backward, backward_authority) = fresh(current.clone())?;
+        let regress =
+            contact::snapshot::converge(older, &self.seed, &mut backward, &backward_authority)
+                .map_err(|f| js_err("converge older into newer", format!("{f:?}")))?;
+        if regress.advanced() {
+            return Err(js_err(
+                "snapshot converge",
+                "a STALE snapshot moved the newer store's frontier — the merge is not monotonic",
+            ));
+        }
+
+        // Idempotent: the forward store absorbs the same snapshot again.
+        let again =
+            contact::snapshot::converge(current, &self.seed, &mut forward, &forward_authority)
+                .map_err(|f| js_err("re-converge the same snapshot", format!("{f:?}")))?;
+        if again.advanced() {
+            return Err(js_err(
+                "snapshot converge",
+                "re-absorbing an already-held snapshot moved the frontier — the merge is not \
+                 idempotent",
+            ));
+        }
+
+        let live_decrypted = self
+            .station
+            .with_replica_read(|replica| Ok(count_decrypted(replica)))
+            .map_err(|e| js_err("read live replica", format!("{e:?}")))?;
+        let forward_decrypted = count_decrypted(&forward);
+        let backward_decrypted = count_decrypted(&backward);
+        if forward_decrypted != live_decrypted
+            || backward_decrypted != live_decrypted
+            || live_decrypted == 0
+        {
+            return Err(js_err(
+                "snapshot converge",
+                format!(
+                    "orders disagree: live decrypts {live_decrypted}, older⊔newer \
+                     {forward_decrypted}, newer⊔older {backward_decrypted} — \
+                     forward[{}] backward[{}]",
+                    body_report(&forward),
+                    body_report(&backward)
+                ),
+            ));
+        }
+        Ok(format!(
+            "both orders decrypt {live_decrypted} bodies matching the live Space; a stale \
+             snapshot moves nothing; re-absorption moves nothing (earlier snapshot carried \
+             {older_bodies} bodies, current {current_bodies})"
+        ))
+    }
 }
 
 /// How many of a replica's collaborative bodies read back decrypted — a body
