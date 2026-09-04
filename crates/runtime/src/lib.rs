@@ -57,6 +57,7 @@
 mod action;
 #[cfg(not(target_arch = "wasm32"))]
 mod admission;
+pub mod architecture;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod beacon;
 pub(crate) mod body_image;

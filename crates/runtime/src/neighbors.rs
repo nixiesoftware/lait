@@ -549,7 +549,12 @@ impl NeighborRegistry {
                 )
             })
             .collect();
-        crate::gradient::rank(items)
+        // Selection is realized from a declared architecture — the gradient is
+        // one authored composition, not a hardcoded strategy. Interpreting it
+        // reproduces `gradient::rank` exactly (equivalence-tested), so behavior
+        // is unchanged; what changed is that the ordering is now a value a Space
+        // could swap.
+        crate::architecture::gradient().realize(items)
     }
 
     /// Note a Station we just accepted an inbound Contact from, so the scheduler
@@ -681,7 +686,10 @@ impl NeighborRegistry {
             // advertised frontier is news we have not yet taken.
             .map(|(k, e)| (k.clone(), anchor_utility(e, true, now_ms)))
             .collect();
-        crate::gradient::rank(due)
+        // Realized from the declared architecture (the gradient composition);
+        // interpreting it reproduces `gradient::rank` exactly.
+        crate::architecture::gradient()
+            .realize(due)
             .into_iter()
             .map(|(k, _)| k)
             .collect()
