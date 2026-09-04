@@ -135,6 +135,43 @@ const REACH_UNKNOWN: u8 = 0;
 const REACH_REACHABLE: u8 = 1;
 const REACH_UNREACHABLE: u8 = 2;
 
+/// Measure one Neighbor's convergence-anchor utility from its durable record.
+/// Pure: the record's advisory signals in, a [`crate::gradient::AnchorUtility`]
+/// out. `has_news` is supplied by the caller because two callers know it two
+/// ways — [`NeighborRegistry::rank_convergence_anchors`] computes it against the
+/// local frontier ([`newsworthy`]), while [`NeighborRegistry::eligible`] knows
+/// it is always true (a `pending` entry advertised a frontier we have not
+/// taken). Dormancy needs no field of its own — [`NeighborRegistry::observe_beacon`]
+/// already collapses a signed dormancy announcement into `REACH_UNREACHABLE`,
+/// so it arrives here as unreachable.
+fn anchor_utility(
+    e: &NeighborRecord,
+    has_news: bool,
+    now_ms: u64,
+) -> crate::gradient::AnchorUtility {
+    use crate::gradient::{AnchorUtility, Reach};
+    let reach = match e.reachability {
+        REACH_REACHABLE => Reach::Reachable,
+        REACH_UNREACHABLE => Reach::Unreachable,
+        _ => Reach::Unknown,
+    };
+    AnchorUtility {
+        reach,
+        has_news,
+        frontier_count: e.frontier_count,
+        in_backoff: e.next_attempt_ms > now_ms,
+        failures: e.failures,
+        last_seen_ms: e.last_seen_ms,
+    }
+}
+
+/// The registry's `newsworthy` test: does this record's advertised frontier
+/// differ from the local one? The full `(root, count)` pair, since a root alone
+/// is not path-independence-safe — the same comparison `observe_beacon` makes.
+fn newsworthy(e: &NeighborRecord, local_frontier: (&[u8; 32], u64)) -> bool {
+    (e.frontier_root, e.frontier_count) != (*local_frontier.0, local_frontier.1)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RegistryFile {
     version: u8,
@@ -484,6 +521,37 @@ impl NeighborRegistry {
             .collect()
     }
 
+    /// Order this Space's Neighbors as **convergence anchors**, best-first: whom
+    /// to pull from to advance `local_frontier`. A pure ranking over advisory
+    /// signals — reachability, frontier freshness, retry health — and never
+    /// authority: the bytes a chosen anchor serves are validated on receipt
+    /// regardless of where it ranks. See [`crate::gradient`] for the ordering
+    /// and why "unmeasured is absent, not zero".
+    ///
+    /// Returns every known Neighbor with its measured
+    /// [`AnchorUtility`](crate::gradient::AnchorUtility); the caller reads
+    /// `is_pullable` (or [`crate::gradient::best_pullable`]) to skip the ones
+    /// that are level with it, unreachable, or in backoff. Iteration is over the
+    /// key-sorted entry map, so equal-fitness anchors come back in a
+    /// deterministic order.
+    pub fn rank_convergence_anchors(
+        &self,
+        local_frontier: (&[u8; 32], u64),
+        now_ms: u64,
+    ) -> Vec<(Key, crate::gradient::AnchorUtility)> {
+        let items = self
+            .entries
+            .values()
+            .map(|e| {
+                (
+                    e.station.clone(),
+                    anchor_utility(e, newsworthy(e, local_frontier), now_ms),
+                )
+            })
+            .collect();
+        crate::gradient::rank(items)
+    }
+
     /// Note a Station we just accepted an inbound Contact from, so the scheduler
     /// dials it **back** to complete the bidirectional exchange (the responder
     /// side only served material; a reciprocal pull is what redeems a joiner's
@@ -584,8 +652,24 @@ impl NeighborRegistry {
     /// The Neighbors eligible for a Contact attempt now: pending, past their
     /// backoff, and holding an unexpired route lease (route expiry suppresses
     /// dialing). Fair order: sorted by `next_attempt_ms` then Key.
+    /// The Neighbors this Station should Contact now, **best convergence anchor
+    /// first**. The filter is unchanged — `pending` (advertised a frontier we
+    /// have not taken), out of backoff (`next_attempt_ms <= now`), and holding a
+    /// live route — but the ORDER is the convergence gradient
+    /// ([`crate::gradient`]) rather than earliest-due: when more Neighbors are
+    /// due than the scheduler's fan-out can dial at once, the freshest, most-
+    /// reachable, most-complete anchors take the slots.
+    ///
+    /// Every entry here is `has_news` by the `pending` invariant and not in
+    /// backoff by the filter, so the gradient turns on the remaining tiers —
+    /// reachability, then frontier count, then retry health, then recency.
+    /// Fairness is preserved across ticks, not within one: a lower-ranked due
+    /// Neighbor waits at most a scheduler tick, and a dial that fails re-arms
+    /// backoff and drops it from this filter, so nothing a high-utility peer
+    /// does can starve a due one indefinitely. Ties resolve deterministically:
+    /// the sort is stable over the key-ordered entry map.
     pub fn eligible(&self, now_ms: u64) -> Vec<Key> {
-        let mut due: Vec<(&NeighborRecord, &Key)> = self
+        let due: Vec<(Key, crate::gradient::AnchorUtility)> = self
             .entries
             .iter()
             .filter(|(_, e)| {
@@ -593,14 +677,14 @@ impl NeighborRegistry {
                     && e.next_attempt_ms <= now_ms
                     && e.routes.iter().any(|r| r.expires_at_ms > now_ms)
             })
-            .map(|(k, e)| (e, k))
+            // `has_news = true`: a `pending` entry is exactly one whose
+            // advertised frontier is news we have not yet taken.
+            .map(|(k, e)| (k.clone(), anchor_utility(e, true, now_ms)))
             .collect();
-        due.sort_by(|a, b| {
-            a.0.next_attempt_ms
-                .cmp(&b.0.next_attempt_ms)
-                .then_with(|| a.1.cmp(b.1))
-        });
-        due.into_iter().map(|(_, k)| k.clone()).collect()
+        crate::gradient::rank(due)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
     }
 
     /// Neighbors dialable now: a live route and no backoff.
@@ -800,6 +884,168 @@ mod tests {
         .unwrap()
         .verify()
         .unwrap()
+    }
+
+    /// A beacon from an arbitrary station seed, so a test can register several
+    /// distinct Neighbors (the fixed-`SEED` helpers are all one station).
+    fn beacon_seeded(
+        seed: &[u8; 32],
+        epoch: u64,
+        sequence: u64,
+        root: [u8; 32],
+        count: u64,
+        flags: u8,
+    ) -> VerifiedBeacon {
+        SignedBeacon::emit(
+            crate::beacon::BEACON_PROTOCOL,
+            &space(),
+            Epoch::from_u64(epoch),
+            sequence,
+            root,
+            count,
+            flags,
+            vec![],
+            seed,
+        )
+        .unwrap()
+        .verify()
+        .unwrap()
+    }
+
+    fn station_of(seed: &[u8; 32]) -> Key {
+        Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
+    }
+
+    #[test]
+    fn convergence_anchors_rank_fresh_reachable_first_and_sink_dormant() {
+        let dir = temp_dir("rank");
+        let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
+        // This Station's own frontier — the yardstick for "has news".
+        let local_root = [5u8; 32];
+        let local = (&local_root, 50u64);
+
+        // A: fresh, non-dormant (→ reachable), ahead of local with a high count.
+        let a = [1u8; 32];
+        reg.observe_beacon(
+            &beacon_seeded(&a, 1, 1, [9u8; 32], 100, 0),
+            local,
+            1_000,
+            60_000,
+        )
+        .unwrap();
+        // B: announces dormancy → observe_beacon folds it to unreachable.
+        let b = [2u8; 32];
+        reg.observe_beacon(
+            &beacon_seeded(&b, 1, 1, [7u8; 32], 70, crate::beacon::BEACON_FLAG_DORMANT),
+            local,
+            1_000,
+            60_000,
+        )
+        .unwrap();
+        // C: reachable, but its frontier is exactly ours — no news to pull.
+        let c = [3u8; 32];
+        reg.observe_beacon(
+            &beacon_seeded(&c, 1, 1, local_root, 50, 0),
+            local,
+            1_000,
+            60_000,
+        )
+        .unwrap();
+
+        let ranked = reg.rank_convergence_anchors(local, 2_000);
+        let order: Vec<Key> = ranked.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(
+            order,
+            vec![station_of(&a), station_of(&c), station_of(&b)],
+            "fresh-reachable-with-news first, then reachable-no-news, then dormant/unreachable",
+        );
+
+        // Utility semantics per anchor.
+        let util = |k: &Key| ranked.iter().find(|(s, _)| s == k).unwrap().1;
+        assert!(
+            util(&station_of(&a)).is_pullable(),
+            "A is the anchor to pull"
+        );
+        assert!(
+            !util(&station_of(&c)).has_news,
+            "C is level with us: nothing to converge",
+        );
+        assert_eq!(
+            util(&station_of(&b)).reach,
+            crate::gradient::Reach::Unreachable,
+            "B's signed dormancy reads as unreachable",
+        );
+        assert!(!util(&station_of(&b)).is_pullable());
+
+        // best_pullable picks A directly.
+        assert_eq!(
+            crate::gradient::best_pullable(reg.rank_convergence_anchors(local, 2_000))
+                .map(|(k, _)| k),
+            Some(station_of(&a)),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn eligible_dials_the_more_complete_anchor_first() {
+        // The composition proof: `eligible` is scheduler-only, and the scheduler
+        // dials it in order under MAX_CONTACTS_IN_FLIGHT — so `eligible`'s order
+        // IS the dial priority. Three Neighbors, all fresh (next_attempt 0), all
+        // reachable, all pending, differing only in advertised frontier count.
+        //
+        // The OLD order sorted by (next_attempt_ms, key): identical next_attempt,
+        // so it fell back to key order — blind to how complete each anchor is.
+        // The gradient orders by completeness, so the scheduler now spends its
+        // bounded fan-out on the anchors that converge it furthest per pull.
+        let dir = temp_dir("eligible-gradient");
+        let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
+        let local = (&[0u8; 32], 0u64);
+
+        let low = [10u8; 32];
+        let high = [20u8; 32];
+        let mid = [30u8; 32];
+        reg.observe_beacon(
+            &beacon_seeded(&low, 1, 1, [1u8; 32], 50, 0),
+            local,
+            1_000,
+            60_000,
+        )
+        .unwrap();
+        reg.observe_beacon(
+            &beacon_seeded(&high, 1, 1, [2u8; 32], 200, 0),
+            local,
+            1_000,
+            60_000,
+        )
+        .unwrap();
+        reg.observe_beacon(
+            &beacon_seeded(&mid, 1, 1, [3u8; 32], 120, 0),
+            local,
+            1_000,
+            60_000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reg.eligible(1_000),
+            vec![station_of(&high), station_of(&mid), station_of(&low)],
+            "most-complete anchor first, regardless of station key order",
+        );
+
+        // The filter is unchanged: backoff still removes a Neighbor from the set
+        // (order is a policy over the SAME eligibility, never a widening of it).
+        reg.record_failure(&station_of(&high), 1_000).unwrap();
+        let after_backoff = reg.eligible(1_000);
+        assert!(
+            !after_backoff.contains(&station_of(&high)),
+            "a failed high-utility anchor is in backoff and drops out — no starvation of the rest",
+        );
+        assert_eq!(
+            after_backoff,
+            vec![station_of(&mid), station_of(&low)],
+            "the remaining due Neighbors keep gradient order",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

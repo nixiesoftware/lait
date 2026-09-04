@@ -89,6 +89,7 @@ pub mod find;
 pub(crate) mod find_evaluator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod generation;
+pub mod gradient;
 mod implementation;
 #[cfg(test)]
 mod internal_tests;
