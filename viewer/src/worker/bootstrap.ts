@@ -86,7 +86,15 @@ const ISSUES = {
  */
 export function bootstrapEngine(loc: Location = self.location): Promise<void> {
   const join = parseJoin(loc.hash);
-  if (!join) return Promise.resolve(); // head topology: httpLink stays bound.
+
+  // The foundation join surface is the bundle served under `/i/` (built
+  // `--base=/i/`). There a bare visit — no ticket — is not head topology (there
+  // is no daemon head to talk to); it is a FOUND, minting a new Space in the
+  // tab. The local app (BASE_URL `/`, served by its daemon) keeps head topology
+  // on a bare load. This is the one signal that separates "static join surface"
+  // from "the app the daemon serves".
+  const foundationSurface = import.meta.env.BASE_URL === "/i/";
+  if (!join && !foundationSurface) return Promise.resolve(); // local app head.
 
   const worker = new Worker(new URL("./engine.worker.ts", import.meta.url), {
     type: "module",
@@ -101,16 +109,20 @@ export function bootstrapEngine(loc: Location = self.location): Promise<void> {
         reject(new Error(data.error ?? "the in-tab engine failed to boot"));
       }
     });
-    // Bucket durability rides only a real foundation-relay join; a dev join
-    // (its own &relay=) leaves these unset and the Worker skips bucket sync.
+    // A join uses its link's relay; a bare-visit found uses the foundation
+    // relay so the founder is reachable there. Bucket durability rides both,
+    // but only against the foundation relay — a dev join (its own &relay=)
+    // never publishes its throwaway Space to the production bucket.
+    const relay = join?.relay ?? FOUNDATION_RELAY;
     const bucket =
-      join.relay === FOUNDATION_RELAY
+      relay === FOUNDATION_RELAY
         ? { gatewayBase: FOUNDATION_GATEWAY, bucketBase: FOUNDATION_SNAPSHOTS }
         : {};
     worker.postMessage({
       type: "boot",
-      relay: join.relay,
-      ticket: join.ticket,
+      relay,
+      // Absent ticket ⇒ the Worker founds instead of joining.
+      ...(join ? { ticket: join.ticket } : {}),
       ...ISSUES,
       ...bucket,
     });

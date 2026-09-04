@@ -37,6 +37,19 @@ declare module "porthole" {
     mount: string,
   ): Promise<BrowserEngineHandle>;
 
+  /** Found a NEW Space in the tab — the daemon-less FOUNDING entry, `boot`
+   *  minus the join ticket. Mints the Space, activates the World with its
+   *  founder grants, and composes the same engine. */
+  export function found(
+    relay: string,
+    seed_hex: string,
+    runner_wasm: Uint8Array,
+    world: string,
+    version: string,
+    release: string,
+    mount: string,
+  ): Promise<BrowserEngineHandle>;
+
   /** Manual wasm init: `await init(wasmUrl)` before `boot` (the `?url` posture,
    *  wasm-pack `--target web`). */
   export default function init(

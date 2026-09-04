@@ -412,3 +412,105 @@ pub async fn pull_space(
         seed,
     }
 }
+
+/// Found a brand-new Space in the tab — the daemon-less FOUNDING path, the
+/// bare-visit counterpart to [`pull_space`]'s join. Mints the Space (genesis,
+/// founder inception, epoch 0 sealed to this device), activates the World and
+/// seeds the founder's declared grants, and stands up a relay transport — the
+/// same shape [`pull_space`] returns, so `boot`'s composition is unchanged. The
+/// founder needs no live-peer duties: the cloud carries durability and
+/// rendezvous (the bucket is the Space's home, the relay the meeting point), so
+/// `responder` is the founder's own key (never dialed by a solo founder) and no
+/// admission loop runs.
+///
+/// Deterministic in the device seed, exactly as the enter path is: the salt,
+/// the space recovery commitment, and every inception nonce derive from the
+/// seed, so a reload re-computes the SAME Space id and REOPENS the store it
+/// already founded rather than minting a second one. One device seed founds one
+/// Space here — enough for a person founding from a browser; multi-Space
+/// founding is a later, larger choice.
+#[allow(clippy::too_many_arguments)]
+pub async fn found_space(
+    relay: &str,
+    seed: [u8; 32],
+    world: &str,
+    implementation_id: [u8; 32],
+    implementation_version: u32,
+    founder_grants: Vec<contact::founding::FounderGrant>,
+    configure: impl FnOnce(&mut Replica),
+) -> PulledSpace {
+    // The whole founding sequence — identity derivation and the ledger's
+    // founding + activation batches — lives in `contact::founding`, native-
+    // tested (founder is admin, World active, grants effective). Here it is only
+    // wired to OPFS: derive the identity, then either reopen the store a prior
+    // found left or create it and run the founding on it.
+    let identity = contact::founding::founding_identity(&seed);
+    let space = identity.space.clone();
+
+    let ledger_medium: Arc<dyn journal::Medium> = Arc::new(
+        journal::OpfsMedium::open(&space_dir("ledger", &space, &seed))
+            .await
+            .expect("opfs"),
+    );
+    let resumed = !is_empty(&ledger_medium);
+    let ledger = if resumed {
+        // A reopen recovers epoch 0 from the sealed envelope the first found
+        // persisted (via `refresh_keyring` below); the founding is not re-run.
+        Authority::open_on(ledger_medium).expect("the founded ledger reopens")
+    } else {
+        let mut ledger =
+            Authority::create_on(ledger_medium, identity.genesis.clone()).expect("fresh ledger");
+        contact::founding::found_on_ledger(
+            &mut ledger,
+            &seed,
+            &identity,
+            world,
+            implementation_id,
+            implementation_version,
+            &founder_grants,
+        )
+        .expect("founding commits");
+        ledger
+    };
+
+    // `refresh_keyring` (run by `LedgerAuthority::new`) unseals epoch 0 to this
+    // device, so the founder can immediately encrypt and read its own writes.
+    let authority = SharedLedgerAuthority::new(LedgerAuthority::new(space.clone(), ledger, seed));
+
+    let replica_medium = journal::OpfsMedium::open(&space_dir("replica", &space, &seed))
+        .await
+        .expect("opfs");
+    let mut replica = Replica::open_on(Arc::new(replica_medium), Arc::new(authority.clone()))
+        .expect("the founded replica opens");
+    configure(&mut replica);
+
+    // A relay transport so the founder is reachable and can publish; there is
+    // no responder to dial (the cloud is the meeting point), so its own key
+    // stands in the field a solo founder never uses.
+    let network = Network::Local(LocalNet {
+        relays: vec![relay.to_owned()],
+    });
+    let transport = DefaultFactory
+        .build(&seed, &network, Protocols::framed(&[]))
+        .await
+        .expect("browser endpoint");
+    let responder = Key::from_key_bytes(
+        mechanics::actor::device_from_seed(&seed)
+            .key_bytes()
+            .expect("founder device key bytes"),
+    );
+
+    console_log(&format!(
+        "[lait] founded Space {} (resumed={resumed})",
+        space.as_str()
+    ));
+    PulledSpace {
+        space,
+        authority,
+        replica,
+        outcome: None,
+        transport,
+        responder,
+        seed,
+    }
+}

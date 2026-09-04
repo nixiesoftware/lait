@@ -1096,15 +1096,41 @@ pub async fn boot(
     })
     .await;
 
-    // Resolve the caller's actor/device from the pulled ledger before it moves
-    // into the composed Station.
+    compose_over(
+        pulled,
+        registry,
+        control,
+        client_runner,
+        world_id,
+        seed,
+        mount,
+    )
+    .await
+}
+
+/// Compose the Station, engine, and handle over a Space that is already stood
+/// up — the shared tail of every entry, whether the Space arrived by a pull
+/// ([`boot`]) or was minted in the tab ([`found`]). Everything World-specific
+/// (the runners, the registry) is settled by the caller; this is the
+/// composition the `tests/dispatch.rs`/`tests/space_call.rs` claims proved.
+async fn compose_over(
+    pulled: crate::space_pull::PulledSpace,
+    registry: runtime::world::Catalog,
+    control: Arc<RemoteWorld>,
+    client_runner: Arc<RemoteWorld>,
+    world_id: replica::body::WorldId,
+    seed: [u8; 32],
+    mount: String,
+) -> Result<BrowserEngineHandle, JsValue> {
+    // Resolve the caller's actor/device from the ledger before it moves into
+    // the composed Station.
     let device = device_from_seed(&seed);
     let ledger = pulled.authority.clone();
     let authority_view = runtime::browser::LedgerAuthorityView(pulled.authority.clone());
     let actor = authority_view
         .resolve(&device)
         .map(|resolution| resolution.actor.as_str().to_string())
-        .ok_or_else(|| JsValue::from_str("the pulled ledger does not admit this device"))?;
+        .ok_or_else(|| JsValue::from_str("the ledger does not admit this device"))?;
 
     let transport = pulled.transport.clone();
     let responder = pulled.responder.clone();
@@ -1150,9 +1176,8 @@ pub async fn boot(
     .map_err(|e| js_err("the browser engine does not compose", format!("{e:?}")))?;
 
     // Join the responder's Live plane for carets/presence — best-effort: a peer
-    // whose Live plane is down (or an old peer without one) leaves carets
-    // absent, never a boot failure. The tab dials the SAME peer the Contact
-    // pull dialed, admitted the same way.
+    // whose Live plane is down (a founder has no responder at all) leaves carets
+    // absent, never a boot failure.
     let local_station = mechanics::station::Key::from_device(&device);
     let live = match local_station {
         Some(local) => {
@@ -1179,6 +1204,94 @@ pub async fn boot(
         registry: kept_registry,
         mount,
     })
+}
+
+/// Found a NEW Space in the tab and stand the engine up over it — the
+/// daemon-less FOUNDING entry, the bare-visit counterpart to [`boot`]. Mints
+/// the Space, activates this World with its declared founder grants (read from
+/// the runner), and composes the same engine `boot` does. `nick` is the
+/// founder's display name; the rest of the arguments are `boot`'s, minus the
+/// join ticket (there is nothing to join).
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub async fn found(
+    relay: String,
+    seed_hex: String,
+    runner_wasm: Vec<u8>,
+    world: String,
+    version: String,
+    release: String,
+    mount: String,
+) -> Result<BrowserEngineHandle, JsValue> {
+    let seed = unhex32(&seed_hex);
+
+    let module = WebModule::compile(&runner_wasm);
+    let init = GuestInit {
+        world: world.clone(),
+        version,
+        release,
+    };
+    let launch = |tag: &str| -> Result<Arc<RemoteWorld>, JsValue> {
+        let instance = WebInstance::launch_from(&module, init.clone())
+            .map_err(|e| js_err(&format!("the {tag} runner instance"), e))?;
+        RemoteWorld::connect_runner(Box::new(instance))
+            .map(Arc::new)
+            .map_err(|e| js_err(&format!("the {tag} runner connect"), e))
+    };
+
+    let world_runner = launch("world")?;
+    // The implementation to activate comes off the runner's descriptor — an
+    // inherent, wasm-safe read. The founder GRANTS do NOT: reaching them through
+    // the runner's `WorldApplication::founder_grants` drags the native
+    // application-broker path (tokio net) into the wasm build. They are a pure
+    // property of the World, so `found` sources them directly from the Issues
+    // contract instead — which does couple this founding entry to Issues (unlike
+    // world-agnostic `boot`), the pragmatic price of a wasm-clean founder until
+    // the runner path is made wasm-safe.
+    let implementation = world_runner.reviewed_implementation();
+    let implementation_version = world_runner.descriptor().implementation_version.0;
+    let world_id = world_runner.descriptor().id.clone();
+    let founder_grants: Vec<contact::founding::FounderGrant> =
+        lait_issues::contract::founder_capabilities()
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (capability, resource))| contact::founding::FounderGrant {
+                    capability,
+                    resource,
+                    salt: [index as u8; 16],
+                },
+            )
+            .collect();
+    let registry = Builder::new()
+        .register_reviewed(world_runner, implementation)
+        .build()
+        .map_err(|e| js_err("the runner's contract does not register", format!("{e:?}")))?;
+
+    let control = launch("control")?;
+    let client_runner = launch("client")?;
+
+    let pulled = crate::space_pull::found_space(
+        &relay,
+        seed,
+        &world,
+        implementation,
+        implementation_version,
+        founder_grants,
+        |replica| runtime::browser::declare_schemas(replica, &registry),
+    )
+    .await;
+
+    compose_over(
+        pulled,
+        registry,
+        control,
+        client_runner,
+        world_id,
+        seed,
+        mount,
+    )
+    .await
 }
 
 /// The base32 render of a Body id — the form the tree renders Body ids in, and

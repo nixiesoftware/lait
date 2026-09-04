@@ -7,6 +7,7 @@
 pub mod admission;
 pub mod authority;
 pub mod coordinates;
+pub mod founding;
 pub mod gateway;
 mod protocol;
 /// The initiator that drives the transcript over a comms stream. Behind the

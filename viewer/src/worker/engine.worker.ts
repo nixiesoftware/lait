@@ -17,7 +17,7 @@
  * `workerLink(worker)` so no frame is posted before the router is listening.
  */
 
-import init, { boot } from "porthole";
+import init, { boot, found } from "porthole";
 
 import { engineRouter } from "./engineRouter";
 
@@ -25,7 +25,9 @@ import { engineRouter } from "./engineRouter";
 interface BootMessage {
   type: "boot";
   relay: string;
-  ticket: string;
+  /** The invite ticket for a JOIN. Absent for a FOUND — a bare foundation-surface
+   *  visit that mints a new Space in the tab instead of joining one. */
+  ticket?: string;
   /** Where the engine wasm (porthole_bg.wasm, ~14 MiB) is served — same-origin
    *  in dev, the signed channel in a release. Only the small JS glue is
    *  bundled; the wasm itself is fetched and pinned, like the runner. */
@@ -157,16 +159,27 @@ async function stand(message: BootMessage): Promise<void> {
   const runner = new Uint8Array(
     await (await fetch(message.runnerUrl)).arrayBuffer(),
   );
-  const handle = await boot(
-    message.relay,
-    seedHex,
-    message.ticket,
-    runner,
-    message.world,
-    message.version,
-    message.release,
-    message.mount,
-  );
+  // A ticket is a JOIN; its absence is a FOUND — mint a new Space in the tab.
+  const handle = message.ticket
+    ? await boot(
+        message.relay,
+        seedHex,
+        message.ticket,
+        runner,
+        message.world,
+        message.version,
+        message.release,
+        message.mount,
+      )
+    : await found(
+        message.relay,
+        seedHex,
+        runner,
+        message.world,
+        message.version,
+        message.release,
+        message.mount,
+      );
   engineRouter(handle, scope);
   scope.postMessage({ type: "ready" });
 
