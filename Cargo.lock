@@ -4092,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -9598,6 +9598,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "world-runner",
+]
+
+[[package]]
+name = "world-host-install"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lait",
 ]
 
 [[package]]

@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+#
+# The always-on host image the Foundation platform runs to keep a Space alive
+# without a person's device present: `lait daemon`, the identity-scoped host.
+# It is what founds and holds "Public" — the shared board a bare
+# `foundation.pub/i` visit lands in — and what stays online as the always-on
+# admission peer, so a browser tab carrying the Public invite is redeemed the
+# moment it dials in over the relay. Built by this repository (the wire and the
+# admission ledger it speaks live here), deployed by NixieSoftware/foundation
+# which owns where and how it runs. Cloud Build builds it — there is no local
+# Docker in the authoring environment — so the context is whatever
+# `.gcloudignore` admits.
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Same toolchain the relay image pins. The daemon links the whole engine
+# (storage, comms, mechanics, the Issues runner surface), all pure Rust over a
+# linker and ring's perl/cc from build-essential.
+FROM rust:1.92-slim-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config perl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The whole workspace, then the daemon and its operator install seam out of it.
+# `world-host-install` installs a first-party World's signed release into the
+# daemon's identity so the headless host can found and hold that World's Space —
+# the one thing a GUI-driven install normally does. No stub cache-warm — the
+# single-crate trick does not survive a workspace, and Cloud Build keeps no
+# layer cache across submissions.
+COPY . .
+RUN cargo build --release --locked -p lait -p world-host-install
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+# Slim runtime; ca-certificates covers the daemon's outbound TLS to the relay.
+# The store lives on a mounted volume at $LAIT_HOME, owned by the unprivileged
+# service user, so the container is disposable and the Space's identity durable.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 lait \
+    && mkdir -p /data && chown lait:lait /data
+
+COPY --from=build /src/target/release/lait /usr/local/bin/lait
+COPY --from=build /src/target/release/world-host-install /usr/local/bin/world-host-install
+
+# An image is a distribution like any other: whoever receives it gets the terms
+# and the account of what it is built from.
+COPY LICENSE /usr/share/doc/lait/LICENSE
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/lait/THIRD-PARTY-NOTICES.md
+
+USER lait
+# The daemon's durable relationship to the Space lives here; mount a host
+# directory or a persistent disk at this path so the identity survives a
+# container replacement.
+ENV LAIT_HOME=/data
+VOLUME ["/data"]
+
+# `lait daemon` is the only long-lived mode; the platform passes its network
+# selection (LAIT_NETWORK=local, LAIT_RELAY=https://relay.foundation.pub) and,
+# for the first bind, a --home is unnecessary because LAIT_HOME already names
+# the store. Founding "Public" and minting its reusable invite is a one-shot
+# against this same store, done at provisioning time.
+ENTRYPOINT ["lait"]
+CMD ["daemon"]

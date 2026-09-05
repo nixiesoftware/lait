@@ -11,6 +11,12 @@ skills/
 hooks/
 ci/
 packaging/
+# The `lait` daemon image compiles the root lib, which `include_str!`s the
+# systemd unit template; re-admit just that file (its parent, so both the
+# classic and BuildKit ignore engines walk into it). The relay/post images
+# never compile it, so they carried packaging/ fully excluded.
+!packaging/linux/
+!packaging/linux/lait.service.in
 .lait/
 .groupchat/
 *.md

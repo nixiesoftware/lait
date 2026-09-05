@@ -41,6 +41,7 @@ members = [
     "tools/stub",
     "tools/world-fixture",
     "tools/world-channel-installer",
+    "tools/world-host-install",
     "tools/world-stage",
     "tools/world-semantic-fixture",
 ]

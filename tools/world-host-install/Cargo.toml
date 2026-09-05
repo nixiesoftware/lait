@@ -1,0 +1,18 @@
+[package]
+name = "world-host-install"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[[bin]]
+name = "world-host-install"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+lait = { path = "../.." }
+
+[lints]
+workspace = true

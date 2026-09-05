@@ -31,6 +31,22 @@ export interface JoinParams {
 export const FOUNDATION_RELAY = "https://relay.foundation.pub";
 
 /**
+ * The shared "Public" board's reusable invite — the one admission capability
+ * every visitor carries. A bare `foundation.pub/i` visit redeems this to JOIN
+ * the single Public Space the foundation daemon founds and holds, so everyone
+ * lands in the same board rather than founding an isolated Space of their own.
+ * From there a person founds their own Spaces; Public stays the permanent
+ * fixture they can always return to from the Space picker.
+ *
+ * Empty until the Public daemon is stood up and mints it: while empty, a bare
+ * visit falls back to founding in-tab, so `/i` works before Public exists. The
+ * value is a reusable ticket, not a seed — it admits, it does not identify, and
+ * it is safe to ship in the static bundle (that is the whole point of "everyone
+ * carries the invite"). Mint it once, against the daemon's Public Space.
+ */
+export const PUBLIC_INVITE = "";
+
+/**
  * The daemon-less durability plane: the write gateway a tab publishes its Space
  * snapshot through, and the public bucket base it reads one back from. Wired
  * ONLY for a foundation-relay join (a real production join); a dev/local join
@@ -66,7 +82,7 @@ export function parseJoin(hash: string): JoinParams | null {
  */
 const ISSUES = {
   world: "com.lait.issues",
-  version: "0.9.5",
+  version: "0.9.6",
   release: "release",
   mount: "issues",
   /** The engine wasm (~14 MiB) — fetched, not bundled (only its small JS glue
@@ -96,6 +112,17 @@ export function bootstrapEngine(loc: Location = self.location): Promise<void> {
   const foundationSurface = import.meta.env.BASE_URL === "/i/";
   if (!join && !foundationSurface) return Promise.resolve(); // local app head.
 
+  // A bare visit to the foundation surface joins the shared "Public" board via
+  // its bundled reusable invite, so every visitor converges in the SAME Space.
+  // An explicit `#join=` link wins (a person entering some other Space). Until
+  // Public exists (PUBLIC_INVITE empty) a bare visit still founds in-tab, so the
+  // surface works before the board is stood up.
+  const effectiveJoin: JoinParams | null =
+    join ??
+    (foundationSurface && PUBLIC_INVITE
+      ? { ticket: PUBLIC_INVITE, relay: FOUNDATION_RELAY }
+      : null);
+
   const worker = new Worker(new URL("./engine.worker.ts", import.meta.url), {
     type: "module",
   });
@@ -109,11 +136,12 @@ export function bootstrapEngine(loc: Location = self.location): Promise<void> {
         reject(new Error(data.error ?? "the in-tab engine failed to boot"));
       }
     });
-    // A join uses its link's relay; a bare-visit found uses the foundation
-    // relay so the founder is reachable there. Bucket durability rides both,
-    // but only against the foundation relay — a dev join (its own &relay=)
-    // never publishes its throwaway Space to the production bucket.
-    const relay = join?.relay ?? FOUNDATION_RELAY;
+    // A join (explicit link or the Public invite) uses its relay; a bare-visit
+    // found uses the foundation relay so the founder is reachable there. Bucket
+    // durability rides both, but only against the foundation relay — a dev join
+    // (its own &relay=) never publishes its throwaway Space to the production
+    // bucket.
+    const relay = effectiveJoin?.relay ?? FOUNDATION_RELAY;
     const bucket =
       relay === FOUNDATION_RELAY
         ? { gatewayBase: FOUNDATION_GATEWAY, bucketBase: FOUNDATION_SNAPSHOTS }
@@ -122,7 +150,7 @@ export function bootstrapEngine(loc: Location = self.location): Promise<void> {
       type: "boot",
       relay,
       // Absent ticket ⇒ the Worker founds instead of joining.
-      ...(join ? { ticket: join.ticket } : {}),
+      ...(effectiveJoin ? { ticket: effectiveJoin.ticket } : {}),
       ...ISSUES,
       ...bucket,
     });
