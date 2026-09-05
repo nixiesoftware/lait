@@ -252,7 +252,7 @@ pub async fn pull_space(
     seed: [u8; 32],
     ticket: &str,
     configure: impl FnOnce(&mut Replica),
-) -> PulledSpace {
+) -> Result<PulledSpace, wasm_bindgen::JsValue> {
     // The ticket is the whole public bundle: space identity, genesis
     // material, and whom to approach.
     let coordinates = SignedCoordinates::parse_link(ticket).expect("ticket parses");
@@ -329,13 +329,18 @@ pub async fn pull_space(
     // "refused" — a browser join rides a residential network, so a transient
     // dial failure retries until the deadline instead of killing the enter.
     //
-    // How long it waits depends on whether it has an alternative. The default
-    // budget — 120s whole, 20s per step — is right for a first visit, which has
-    // nothing else to show. For a device already holding this Space it is far
-    // too long, and bounding it is what makes the fallback below reachable at
-    // all: the fallback runs on a FAILED pull, so a pull that takes two minutes
-    // to fail is a two-minute blank tab. Measured against an unreachable relay,
-    // the dial reports `Unreachable` at exactly this bound.
+    // How long it waits depends on whether it has an alternative. A device
+    // already holding this Space bounds each pull to `OFFLINE_GRACE` so the
+    // local-serve fallback below is reachable quickly. A first visit has nothing
+    // to fall back to, so it RETRIES: each pull is bounded short (a hung dial
+    // fails fast) and the loop re-dials within a generous overall budget. The old
+    // single `Deadlines::default()` (120s whole) was the flaky-join defect — it
+    // was LONGER than the loop's own wall, so one stalled dial ran out the wall
+    // before a single retry, and the `assert!` that enforced the wall aborted the
+    // wasm worker: the tab went blank forever with the worker never reporting
+    // ready. The transient failure this rides — the relay routing or the peer's
+    // relay presence re-establishing — clears on a re-dial, which is exactly what
+    // this loop's own comments already say it is for.
     let serve_local_if_unreachable = resumed && admitted(&authority);
     let deadlines = if serve_local_if_unreachable {
         Deadlines {
@@ -343,10 +348,17 @@ pub async fn pull_space(
             progress: OFFLINE_GRACE,
         }
     } else {
-        Deadlines::default()
+        Deadlines {
+            whole: n0_future::time::Duration::from_secs(30),
+            progress: n0_future::time::Duration::from_secs(15),
+        }
     };
     let started = n0_future::time::Instant::now();
-    let deadline = started + n0_future::time::Duration::from_secs(60);
+    // The overall budget the loop re-dials within. Comfortably several short
+    // pulls, so a transient relay/peer-presence stall becomes a slower join
+    // rather than a dead tab. Reached only when the peer is genuinely
+    // unreachable for the whole window — then a legible error, never a panic.
+    let overall = started + n0_future::time::Duration::from_secs(180);
     let outcome = loop {
         let reverse = admission_push(&authority);
         let awaiting = reverse.is_some();
@@ -366,12 +378,14 @@ pub async fn pull_space(
                 if !awaiting || admitted(&authority) {
                     break Some(outcome);
                 }
-                // The two terminal absences are different facts and say so:
-                // the peer ANSWERED but no admin has redeemed the request.
-                assert!(
-                    n0_future::time::Instant::now() < deadline,
-                    "the peer answered but the admission was not redeemed within the deadline"
-                );
+                // The peer ANSWERED but no admin has redeemed the request yet.
+                // Keep re-dialing — the admission push rides each pull — until
+                // the budget, then surface it rather than aborting the worker.
+                if n0_future::time::Instant::now() >= overall {
+                    return Err(wasm_bindgen::JsValue::from_str(
+                        "reached the space but this device was not admitted in time — reload to retry",
+                    ));
+                }
             }
             Err(failure) => {
                 // A device that has been admitted and still holds its store does
@@ -392,17 +406,20 @@ pub async fn pull_space(
                     ));
                     break None;
                 }
-                let now = n0_future::time::Instant::now();
-                assert!(
-                    now < deadline,
-                    "the Space could not be pulled within the deadline: {failure:?}"
-                );
+                // A transient dial failure on a residential network — retry a
+                // fresh dial rather than kill the enter. Give up only at the
+                // overall budget, with a legible error the head can surface.
+                if n0_future::time::Instant::now() >= overall {
+                    return Err(wasm_bindgen::JsValue::from_str(&format!(
+                        "the space could not be reached in time ({failure:?}) — reload to retry"
+                    )));
+                }
             }
         }
         n0_future::time::sleep(n0_future::time::Duration::from_millis(750)).await;
     };
 
-    PulledSpace {
+    Ok(PulledSpace {
         space,
         authority,
         replica,
@@ -410,7 +427,7 @@ pub async fn pull_space(
         transport,
         responder,
         seed,
-    }
+    })
 }
 
 /// Found a brand-new Space in the tab — the daemon-less FOUNDING path, the

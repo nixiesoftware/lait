@@ -366,10 +366,11 @@ impl BrowserEngineHandle {
     /// the Worker's to attach when it wraps this in a `session:event` for the
     /// watching session — one Live connection can answer several sessions.
     ///
-    /// Received carets are the responder's own local editors: the daemon
-    /// publishes only its local presence (it does not relay other peers'), so
-    /// the author is the responder's actor. A future daemon that relays would
-    /// carry the station per item.
+    /// A received caret is attributed to its true author: a supporter that
+    /// relays (`feature::PRESENCE_RELAY`, which this tab negotiates on connect)
+    /// carries each item's origin station in a `RelayedPresence`, so `live_entry`
+    /// draws ANOTHER peer's caret under that peer rather than under the supporter.
+    /// A bare, un-relayed item (no origin) is the responder's own.
     #[wasm_bindgen(js_name = drainCaret)]
     pub async fn drain_caret(&self) -> Result<Option<String>, JsValue> {
         let Some(live) = self.live.as_ref() else {
@@ -1111,7 +1112,7 @@ pub async fn boot(
     let pulled = pull_space(&relay, seed, &ticket, |replica| {
         runtime::browser::declare_schemas(replica, &registry);
     })
-    .await;
+    .await?;
 
     compose_over(
         pulled,
@@ -1192,15 +1193,38 @@ async fn compose_over(
     )
     .map_err(|e| js_err("the browser engine does not compose", format!("{e:?}")))?;
 
-    // Join the responder's Live plane for carets/presence — best-effort: a peer
-    // whose Live plane is down (a founder has no responder at all) leaves carets
-    // absent, never a boot failure.
+    // Join the responder's Live plane for carets/presence — best-effort, but
+    // RETRIED: the Live session rides the same relay the ENTER pull does, and a
+    // single transient failure at boot would otherwise leave carets/presence
+    // absent for the WHOLE session (nothing retries this connect elsewhere) — the
+    // likeliest reason a room shows no cursors even when convergence works. A few
+    // short attempts clear the same transient relay/peer-presence race the pull
+    // loop rides. A founder with no responder, or a peer whose Live plane is
+    // genuinely down, still ends at None — carets absent, never a boot failure.
     let local_station = mechanics::station::Key::from_device(&device);
     let live = match local_station {
         Some(local) => {
-            crate::live_client::LiveClient::connect(transport.as_ref(), &space, &local, &responder)
+            let mut client = None;
+            for attempt in 0..5u32 {
+                match crate::live_client::LiveClient::connect(
+                    transport.as_ref(),
+                    &space,
+                    &local,
+                    &responder,
+                )
                 .await
-                .ok()
+                {
+                    Ok(connected) => {
+                        client = Some(connected);
+                        break;
+                    }
+                    Err(_) if attempt + 1 < 5 => {
+                        n0_future::time::sleep(n0_future::time::Duration::from_millis(500)).await;
+                    }
+                    Err(_) => {}
+                }
+            }
+            client
         }
         None => None,
     };

@@ -3230,6 +3230,10 @@ function Description({
 
   const report = useRef(onError);
   report.current = onError;
+  // A stable handle to the session-lane read, so the convergence effect below
+  // can re-read without listing an inline prop in its dependency array.
+  const readLatest = useRef(onReadLatest);
+  readLatest.current = onReadLatest;
   // The form this document would round-trip to, when it does not round-trip
   // cleanly today. Present means read-only *and* repairable, which is a better
   // thing to show a person than either fact alone.
@@ -3255,11 +3259,38 @@ function Description({
   );
 
   useEffect(() => {
-    if (pendingRef.current === 0) {
-      settledText.current = value;
-      settledRevision.current = textRevision(value);
-      setAuthoritative(value);
-    }
+    if (pendingRef.current !== 0) return;
+    // `value` is the link-lane `issue_detail` projection. A change to it signals
+    // convergence — but that trigger fires for ANY field: a peer's *title* edit
+    // rings a coarse reset that re-reads the whole issue, and this projection can
+    // lag the session-lane merged text. Trusting `value` here would regress the
+    // editor to a stale body and silently erase in-progress local edits (the
+    // reconciliation applies it via an externalUpdate, emitting no compensating
+    // splice — so the loss never propagates and the peers diverge). Re-read the
+    // authoritative session-lane value (`issue_view`, the same read that confirms
+    // splices) so the editor only ever moves to the true merged text, never below
+    // it. If `value` already equals the settled text there is nothing to do.
+    if (value === settledText.current) return;
+    let cancelled = false;
+    void readLatest
+      .current()
+      .then((latest) => {
+        if (cancelled || pendingRef.current !== 0) return;
+        settledText.current = latest;
+        settledRevision.current = textRevision(latest);
+        setAuthoritative(latest);
+      })
+      .catch(() => {
+        // The session-lane read failed; fall back to the link-lane value rather
+        // than leaving the editor stranded on an older revision.
+        if (cancelled || pendingRef.current !== 0) return;
+        settledText.current = value;
+        settledRevision.current = textRevision(value);
+        setAuthoritative(value);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [value]);
 
   useEffect(() => {

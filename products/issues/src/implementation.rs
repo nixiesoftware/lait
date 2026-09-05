@@ -8139,7 +8139,7 @@ fn stage_label_create(
         &LabelMeta { name, color },
         false,
     )?);
-    Ok(contract::demand_space_any("catalog.label.configure"))
+    Ok(contract::demand_space_work("catalog.label.configure"))
 }
 
 fn stage_label_edit(
@@ -8187,7 +8187,7 @@ fn stage_label_edit(
     if meta == current {
         return Ok((
             id,
-            contract::demand_space_any("catalog.label.configure"),
+            contract::demand_space_work("catalog.label.configure"),
             false,
         ));
     }
@@ -8196,7 +8196,7 @@ fn stage_label_edit(
     )?);
     Ok((
         id,
-        contract::demand_space_any("catalog.label.configure"),
+        contract::demand_space_work("catalog.label.configure"),
         true,
     ))
 }
@@ -8217,7 +8217,7 @@ fn stage_label_delete(
     staging.absorb_records(crate::record_store::write_label(
         ctx, &catalog, &id, &meta, true,
     )?);
-    Ok((id, contract::demand_space_any("catalog.label.configure")))
+    Ok((id, contract::demand_space_work("catalog.label.configure")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9269,7 +9269,7 @@ impl World for IssuesWorld {
                                 kind: "project".into(),
                                 id,
                             });
-                            let next = contract::demand_space_any("project.create");
+                            let next = contract::demand_space_work("project.create");
                             demand = Some(match demand {
                                 Some(current) => require_both(current, next)?,
                                 None => next,
@@ -10921,7 +10921,7 @@ impl World for IssuesWorld {
             } => {
                 let catalog = CatalogState::default();
                 stage_project_create(&mut staging, ctx, &catalog, &id, &name, &key, &color)?;
-                staging.require(contract::demand_space_any("project.create"));
+                staging.require(contract::demand_space_work("project.create"));
                 Ok(staging.into_effect(None))
             }
             IssueIntent::LabelNew {
@@ -10954,7 +10954,7 @@ impl World for IssuesWorld {
                     crate::record_store::apply_team(ctx, &mut catalog_storage, team)?;
                 }
                 let catalog = &mut catalog_storage;
-                staging.require(contract::demand_space_any("project.configure"));
+                staging.require(contract::demand_space_work("project.configure"));
                 let current = catalog.projects.get(&id).ok_or(Rejection::InvalidRequest)?;
                 let mut meta = current.clone();
                 let description_changed = description.is_some();
@@ -11025,7 +11025,7 @@ impl World for IssuesWorld {
             } => {
                 let mut catalog = CatalogState::default();
                 crate::record_store::apply_project(ctx, &mut catalog, &project_id)?;
-                staging.require(contract::demand_space_any("project.configure"));
+                staging.require(contract::demand_space_work("project.configure"));
                 if !catalog.projects.contains_key(&project_id) {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -11975,7 +11975,7 @@ impl World for IssuesWorld {
                     &id,
                 )?;
                 let catalog = &mut catalog_storage;
-                staging.require(contract::demand_space_any("project.configure"));
+                staging.require(contract::demand_space_work("project.configure"));
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -12073,7 +12073,7 @@ impl World for IssuesWorld {
                     &id,
                 )?;
                 let catalog = &mut catalog_storage;
-                staging.require(contract::demand_space_any("project.configure"));
+                staging.require(contract::demand_space_work("project.configure"));
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -12195,7 +12195,7 @@ impl World for IssuesWorld {
                 let mut catalog_storage = CatalogState::default();
                 let catalog = &mut catalog_storage;
                 crate::record_store::apply_initiative(ctx, catalog, &id)?;
-                staging.require(contract::demand_space_any("project.create"));
+                staging.require(contract::demand_space_work("project.create"));
                 let description_changed = description.is_some();
                 if id.is_empty() {
                     return Err(Rejection::InvalidRequest);
@@ -12422,7 +12422,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                staging.require(contract::demand_space_any("project.create"));
+                staging.require(contract::demand_space_work("project.create"));
                 if !contract::TRIAGE_OUTCOMES.contains(&outcome.as_str()) {
                     return Err(Rejection::InvalidRequest);
                 }

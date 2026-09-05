@@ -241,6 +241,24 @@ pub fn demand_space_any(capability: &str) -> Vec<u8> {
     .expect("canonical space-any demand")
 }
 
+/// `Any(Require(<capability>, Space), Require(space.contributor, Space),
+/// Require(space.admin, Space))` — a Space-scoped structural write (project,
+/// milestone, or label management) that an ordinary member may perform. Same
+/// shape as [`demand_space_any`] but with the `space.contributor` clause, so a
+/// contributor satisfies it exactly as [`demand_project_work`] lets them do
+/// issue work. Registry/policy mutations that must stay admin-only
+/// (`policy.configure`, `catalog.workflow.configure`) keep using
+/// [`demand_space_any`], which omits that clause.
+pub fn demand_space_work(capability: &str) -> Vec<u8> {
+    AuthorizationDemand::Any(vec![
+        AuthorizationDemand::require(space_cap(capability), space_resource()),
+        AuthorizationDemand::require(space_cap("space.contributor"), space_resource()),
+        AuthorizationDemand::require(space_cap("space.admin"), space_resource()),
+    ])
+    .encode_canonical()
+    .expect("canonical space-work demand")
+}
+
 /// `Any(Require(<capability>, Project(<id>)), Require(space.admin, Space))` —
 /// a Project-scoped mutation with the explicit admin override (the shape
 /// `project.delete` uses).
@@ -2978,5 +2996,72 @@ mod stored_comment_tests {
             serde_json::from_str::<StoredComment>(&json).expect("decode"),
             comment
         );
+    }
+}
+
+#[cfg(test)]
+mod demand_authority_tests {
+    //! The write-authority boundary: which structural writes an ordinary member
+    //! (a `space.contributor`) may perform, and which stay admin-only. The
+    //! difference is exactly whether the demand's `Any` carries a
+    //! `space.contributor` leaf — the same clause `demand_project_work` uses to
+    //! let a member do issue work. `world_policy.rs`'s ledger test proves an
+    //! `Any(contributor, admin)` demand is satisfied by a contributor grant;
+    //! these pin which product demands carry that clause.
+    use super::*;
+
+    /// The capability names on the `Require` leaves of a top-level `Any` demand.
+    fn any_leaf_caps(encoded: &[u8]) -> Vec<String> {
+        match AuthorizationDemand::decode_canonical(encoded).expect("canonical demand decodes") {
+            AuthorizationDemand::Any(children) => children
+                .iter()
+                .filter_map(|d| match d {
+                    AuthorizationDemand::Require { capability, .. } => Some(capability.name.clone()),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected an Any demand, got {other:?}"),
+        }
+    }
+
+    /// Project, milestone (`project.configure`), and label creation are
+    /// member-writable: each demand admits `space.contributor`, so a joiner who
+    /// holds the ordinary contributor grant can create them — while `space.admin`
+    /// and the named space capability both remain valid paths.
+    #[test]
+    fn member_structural_writes_admit_the_contributor() {
+        for capability in ["project.create", "project.configure", "catalog.label.configure"] {
+            let caps = any_leaf_caps(&demand_space_work(capability));
+            assert!(
+                caps.contains(&"space.contributor".to_string()),
+                "{capability}: demand_space_work must admit space.contributor, got {caps:?}"
+            );
+            assert!(
+                caps.contains(&capability.to_string()),
+                "{capability}: its own space capability stays a path, got {caps:?}"
+            );
+            assert!(
+                caps.contains(&"space.admin".to_string()),
+                "{capability}: the admin override is preserved, got {caps:?}"
+            );
+        }
+    }
+
+    /// Policy and workflow configuration stay admin-only: their `demand_space_any`
+    /// gate carries no `space.contributor` leaf, so an ordinary member cannot
+    /// silently reach registry/policy administration.
+    #[test]
+    fn admin_only_writes_exclude_the_contributor() {
+        for capability in ["policy.configure", "catalog.workflow.configure"] {
+            let caps = any_leaf_caps(&demand_space_any(capability));
+            assert!(
+                !caps.contains(&"space.contributor".to_string()),
+                "{capability}: demand_space_any must NOT admit a contributor, got {caps:?}"
+            );
+            assert!(
+                caps.contains(&"space.admin".to_string()),
+                "{capability}: admin remains the path, got {caps:?}"
+            );
+        }
     }
 }
